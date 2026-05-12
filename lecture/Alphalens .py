@@ -1,0 +1,845 @@
+# -*- coding: utf-8 -*-
+# Auto-generated from Alphalens .ipynb by tools/ipynb_to_py.py
+# Do not edit by hand; re-run the converter to regenerate.
+
+
+# %% [markdown] cell 0
+# # Alphalens
+#
+# 用於因子研究，請下載此檔案並執行，以獲得最佳閱讀體驗。
+
+# %% [code] cell 1
+import os 
+StockList = \
+['1227', '1234', '1304', '1314', '1434', '1440', '1476', '1504', '1507', '1590', '1605', '1710', '1717', '1723', '1789',
+ '1802', '1907', '2006', '2015', '2049', '2101', '2103', '2106', '2204', '2227', '2327', '2337', '2344', '2356', '2360', '2362',
+ '2379', '2384', '2385', '2392', '2395', '2449', '2450', '2451', '2489', '2501', '2504', '2511', '2542', '2545', '2548',
+ '2603', '2606', '2607', '2608', '2609', '2610', '2615', '2618', '2707', '2723', '2727', '2809', '2812', '2834', '2845',
+ '2847', '2855', '2884', '2887', '2888', '2889', '2903', '2915', '3034', '3037', '3044', '3149', '3189', '3406', '3702', '4938',
+ '4958', '5522', '5871', '6005', '6176', '6239', '6269', '6286', '8008', '8046', '8078', '8422', '9904', '9907', '9914', '9917', '9921',
+ '9933', '9940', '9945', '2458', '2206', '1201', '2347', '3231', '5534', '6116', '9910', '1477', '2353', '6271', '1319',
+ '1722', '2059', '3060', '3474', '3673', '2393', '2376', '2439', '3682', '2201', '2377', '3576', '2352', '2838', '8150',
+ '2324', '2231', '8454', '2833', '6285', '6409', '1536', '1702', '2313', '2498', '2867', '6415', '6456', '9938', '2383', '4137', 
+ '1707', '1589', '2849', '6414', '8464', '2355', '2345', '3706', '2023', '2371', '1909', '2633', '3532', '9941', '2492', '3019',
+ '3443', '4915', '4943', '1229', '2441', '2027', '3026', '1210', '2104', '2456', '5269', '8341', '2354', '3005', '3481', '6669',
+ '2409', '3023', '6213', '2404', '3533', '6278', '6592', '3653', '3661', '3665', '2301', '3714', '2883', '2890', '6531', '1904',
+ '2014', '2105', '2108', '2474', '2637', '6781', '1102', '4919', '1402', '3035', '3036', '4961', '6719', '6770', '2368', '1795',
+ '6550', '6789', '3017', '1101', '1216', '1301', '1303', '1326', '2002', '2207', '2303', '2308', '2311', '2317', '2325', '2330',
+ '2357', '2382', '2412', '2454', '2801', '2880', '2881', '2882', '2885', '2886', '2891', '2892', '2912', '3008', '3045', '3697',
+ '4904', '5880', '6505', '2408', '3711', '5876', '6452','5264', '2823','1262', '2448', '1704']
+
+
+os.environ['ticker'] = ' '.join(StockList)
+os.environ['TEJAPI_BASE'] = "https://api.tej.com.tw"
+os.environ['TEJAPI_KEY'] = 'YOUR KEY'
+
+
+
+os.environ['mdate'] = "20180726 20230726"
+
+# !zipline ingest -b tquant
+
+# %% [code] cell 2
+import pandas as pd 
+import numpy as np 
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy import stats
+import alphalens
+import TejToolAPI
+import tejapi
+
+# %matplotlib inline
+plt.rcParams['figure.dpi'] = 200
+sns.set_style('white')
+
+# %% [markdown] cell 3
+# # 觀察載入資料
+
+# %% [code] cell 4
+from zipline.data.data_portal import get_bundle
+
+df_bundle = get_bundle(bundle_name = 'tquant',
+                        calendar_name = 'TEJ',
+                        start_dt = pd.Timestamp("2018-07-26", tz = "UTC"),
+                        end_dt = pd.Timestamp("2023-07-26", tz = "UTC"))
+
+# %% [code] cell 5
+df_bundle.head(15)
+
+# %% [markdown] cell 6
+# # 建立因子
+#
+# 本次發想至 Fama-French 三因子模型中的 SMB 因子，以每日各公司標準化後的市值作為因子進行後續因子分析。
+
+# %% [code] cell 7
+from zipline.data import bundles
+
+bundle = bundles.load("tquant")
+sids = bundle.asset_finder.equities_sids
+assets = bundle.asset_finder.retrieve_all(sids)
+symbols = [i.symbol for i in assets]
+columns = ["Market_Cap_Dollars"]
+
+mkt_value = TejToolAPI.get_history_data(
+    ticker = symbols,
+    columns = columns,
+    tranfer_to_chinese = False,
+    start = pd.Timestamp("2018-07-02", tz = "UTC"),
+    end = pd.Timestamp("2023-07-02", tz = "UTC"),
+    fin_type = ["A"],
+    include_self_acc = "Y"
+)
+
+# %% [code] cell 8
+import pytz
+mkt_value['mdate'] = pd.to_datetime(mkt_value['mdate'])
+
+means = mkt_value.groupby("mdate").mean()
+stds = mkt_value.groupby("mdate").std()
+means.rename({"Market_Cap_Dollars":"mean"}, axis = 1, inplace = True)
+stds.rename({"Market_Cap_Dollars":"std"}, axis = 1, inplace = True)
+ovo = means.merge(stds, left_index = True, right_index = True)
+mkt_value_med = mkt_value.merge(ovo, left_on = "mdate", right_index = True).reset_index(drop=True)
+mkt_value_med["MKTValue"] = (mkt_value_med.Market_Cap_Dollars - mkt_value_med['mean']) / mkt_value_med['std']
+mkt_value_med['mdate'] = mkt_value_med['mdate'].dt.tz_localize(pytz.utc)
+mkt_value_med.set_index(['mdate', 'coid'], inplace = True)
+mkt_value = mkt_value_med.MKTValue
+
+# %% [code] cell 9
+mkt_value
+
+# %% [markdown] cell 10
+# # 取得價格資料
+
+# %% [markdown] cell 11
+# 也可以使用`get_bundle_price`來取得價格資料。
+# ```python
+# from zipline.data.data_portal import get_bundle_price
+#
+# # fields可指定撈取的欄位，預設為" * "，代表取得所有欄位。
+# # 支援的field：
+# # ["*","open", "high", "low", "close", "volume","open_adj", "high_adj", "low_adj", "close_adj", "volume_adj"]
+# pricing = get_bundle_price(start_dt=pd.Timestamp("2018-07-26"),
+#                            end_dt=pd.Timestamp("2023-07-26"),
+#                            fields='open_adj',
+#                            transform=True)['open_adj']
+#
+# pricing.columns = [x.symbol for x in pricing.columns]
+# ```
+
+# %% [code] cell 12
+pricing = df_bundle[['date','symbol','open_adj']].set_index(['date','symbol']).iloc[1:].unstack('symbol')['open_adj']
+pricing.head(6)
+
+# %% [markdown] cell 13
+# # Sector mapping
+#
+# 取得資產的產業類別
+
+# %% [code] cell 14
+sector = tejapi.fastget('TWN/APISTKATTR',
+                    coid=df_bundle.symbol.unique(),
+                    opts={'columns':['coid','main_ind_e','main_ind_c']},
+                    paginate=True).rename(columns={'coid':'symbol',
+                                                   'main_ind_e':'sector',
+                                                   'main_ind_c':'sector_code'})
+
+# %% [code] cell 15
+sector_map = sector.set_index("symbol")['sector'].to_dict()
+
+# %% [code] cell 16
+sector_map
+
+# %% [markdown] cell 17
+# # 建立因子與報酬表
+#
+# ### Further information
+#
+# ```python
+# alphalens.utils.get_clean_factor_and_forward_returns(factor,
+#                                                      prices,
+#                                                      groupby=None,
+#                                                      binning_by_group=False,
+#                                                      quantiles=5,
+#                                                      bins=None,
+#                                                      periods=(1, 5, 10),
+#                                                      filter_zscore=20,
+#                                                      groupby_labels=None,
+#                                                      max_loss=0.35,
+#                                                      zero_aware=False,
+#                                                      cumulative_returns=True)
+# ```
+#
+# - 利用`alphalens.utils.get_clean_factor_and_forward_returns()`將因子資料（`factor`參數）、價格資料（`prices`參數）以及部門資料（`groupby`參數）整理成一個資料表，以利後續計算，這個資料表的索引（index）是日期（DatetimeIndex）及公司碼（asset）。
+# - 此外這邊也會針對因子資料或價格資料缺值的資料做清理，確保可以正確計算。
+# - 最重要的是這邊會利用因子資料將樣本分組（`quantiles`、`bins`、`binning_by_group`、`zero_aware`參數）及利用預計的持有期（`periods`參數）計算持有期報酬率。
+#   - `quantiles`、`bins`、`binning_by_group`：
+#     - quantiles：*int or sequence[float]*
+#       - 利用樣本公司數量來分組，**預設值為5**。參考[pandas.qcut](https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.qcut.html#pandas.qcut)。
+#       - `quantile`與`bins`只能擇一使用。
+#       - 當quantiles為*int*：將樣本按照數量盡可能平均分配至各組，若樣本公司有100家，欲將樣本公司分為5組（`quantile=5`），且每一組皆須有20家公司，則quantiles方法會將因子値（`factor`）最小的20家公司分到第1組，因子値最大的20家公司分到第5組，以此類推。
+#       - 當quantiles為*sequence[float]*：允許數量不均等的分組，若有以下5個factor：[1,2,3,4,5]且**quantiles=[0, .5, 1.]**（代表會分為兩組：(0,0.5]及(0.5,1.]），則[1,2,3]會被分到第1組；[4,5]會被分到第2組。
+#     - bins：*int or sequence[float]*
+#       - 利用因子取値範圍分組，類似直方圖的概念。參考[pandas.cut](https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.cut.html#pandas.cut)。
+#       - `quantile`與`bins`只能擇一使用。若要使用bins必須設定**`quantile`=None**，因`quantile`預設值為5。
+#       - 當bins為*int*：若因子取値於0至100，欲按因子値（`factor`）數值大小均分為5組（`bins=5`），則bins方法會將因子値介於0到20的公司分到第1組，因子値介於21~40的公司分到第2組，以此類推。每一組的公司數目不一定相同。
+#       - 當bins為*sequence[float]*：允許間距不均等的分組，若有以下4個factor：[1, 2, 3, 4]且**bins=[0, 3, 4]**（代表會分為兩組：(0., 3.]及(3., 4.]），則[1,2,3]會被分到第1組；[4]會被分到第2組。
+#     - binning_by_group：*bool*
+#       - 可結合上述兩者做部門內分組，達成**部門中立（group neutral）**的效果。
+#       - 以結合quantiles及binning_by_group的分組方式為例，若欲分為5組（`quantile=5`且`binning_by_group=True`），則該方法會將每一個部門內因子値最小的一群公司分到第1組，因子値最大的一群公司分到第5組。
+#   - `zero_aware`：*bool, optional*
+#     - 預設為False，當設定為True時，**quantiles或bins必須是整數**。
+#     - 若設定為True時，會先將因子（`factor`）資料依數值大小分為 **>=0**及 **<0**兩組，再個別將兩組內的資料平均切分（quantiles//2）。
+#     - 以結合`quantiles`及`zero_aware`的分組方式為例，若有以下10個factor：[-4,-3,-2,-1,1,2,3,4,5,6]欲分為5組（`quantile=5`且`zero_aware=True`），則：
+#       - 先將5//2得到2，因此因子值>=0的樣本平均分2組；因子值<0的樣本平均分2組，總共4組。
+#       - -4及-3分至第1組；-2及-1分至第2組；1、2及3分至第3組；4、5及6分至第4組。
+# - 另外，利用`filter_zscore`參數可以將大於平均值X倍標準差的持有期報酬率修改為nan。（不推薦使用，因為這會產生lookahead bias）
+#
+# #### 因子資料及價格資料的一些規範：
+# - `factor`及`prices`資料的timezone要一致。
+# - `factor`及`prices`資料的DatetimeIndex不可其中一個是timezone-aware另一個是timezone-naive。
+# - `factor`及`prices`資料的日期起訖可以不一樣，但不能一邊有非交易日，一邊都是交易日。  
+#   （否則會報錯`ValueError: Inferred frequency None from passed values does not conform to passed frequency C`）
+#
+# #### 持有期報酬率
+# 因為這邊是模擬利用因子做逐日交易的策略，所以持有期報酬率是每日計算。  
+# （若提供的因子、價格及部門分類資料為月頻率，則持有期報酬率就是逐月計算） 
+#
+# 根據《Fundamental law of active management》（Grinold, 1989）一書，投資組合獲取超額報酬的能力可以用資訊比率衡量（IR），IR又可以拆分成資訊係數（IC）及投資策略廣度（BR）。公式如下：  
+#
+# $$ IR=IC * \sqrt {BR} $$
+#
+# 其中，IC是利用因子値與持有期報酬率間的相關係數來衡量因子有效性，隱含經理人的預測能力，這部份會於資訊分析（information）中說明。  
+#   
+# 而BR則可以透過提高交易的頻率來改善，並近一步提升IR。舉例來說，若是每日換股，則每年交易次數約為252次；若是每22天換一次股，則會降低每一年的交易次數（約為252／22次），進而降低報酬。  
+#   
+# 為了避免這個情況，Alphalens模擬一種策略：以持有期為22天為例，利用持有期訂定一個交易週期（22天），並且將本金分為22等份。每一天利用其中1等份的本金交易，22天後調整持股，所以總共會有22個投資組合。此外，由於將本金分成22份，滑價（slippage） 的影響也會降低。
+# <br>
+#
+# > #### 持有期報酬率計算：$${個股i、日期為t且持有期間為n的持有期報酬率=}\frac{(股價_{i,t+n})}{股價_{i,t}}{-1}$$   
+# >
+# > #### 範例：
+# >
+# > date=2013-01-02，asset=1102，持有1D報酬率 =（2013-01-03收盤價／2013-01-02收盤價）－1。
+
+# %% [code] cell 18
+factor_data = alphalens.utils.get_clean_factor_and_forward_returns(mkt_value,
+                                                                   pricing,
+                                                                   quantiles = 5,
+                                                                   bins = None,
+                                                                   groupby = sector_map
+                                                                  )
+
+# %% [code] cell 19
+factor_data
+
+# %% [markdown] cell 20
+# # Analysis
+#
+# #### Alphalens提供以下三種類型的因子分析工具，讓我們對因子有初步的了解：
+# - Returns（報酬率分析）
+# - Information（資訊分析）
+# - Turnover（周轉率分析）
+#
+# #### 透過以上的功能，可以從中了解以下內容，並輔助後續的回測：
+#
+# - 因子預測力的好壞。
+# - 因子的周轉率是否過高（可能導致較高的交易成本）。
+# - 持有期應該如何設置最恰當。
+# - 因子在所有部門中的表現是否一致。
+# - 在多空對沖策略中，哪些股票應該做多，哪些股票應該放空。
+# - 應該用哪一種權重形成投資組合？等權重（equally weighted）或因子加權（factor weighted）。
+#
+# #### 後續研究：  
+#
+# 當使用Alphalens分析因子後，我們可以了解因子的**預測能力**及**因子最佳的交易方式**。但因為Alphalens不考慮股票交易時所產生的**手續費、滑價、暫停交易、漲跌停**等因素，故後續可以再透過Zipline、Pyfolio或其他分析工具進行更深入的分析，了解因子在實際交易上的可能性。
+#
+
+# %% [markdown] cell 21
+# # Returns Analysis
+#
+# #### 報酬率處理方式：
+# Alphalens的函數中，若將`long_short`或`demeaned`參數設定為True則將每一檔股票的報酬率扣除全市場（所有樣本公司）的平均報酬，得到demeaned後的報酬率，消除整體市場波動的影響。
+#
+# 兩種報酬率處理方式可按照預期的投資策略或欲觀察的重點來選擇：
+# - 若預期採用的是多空對沖策略（long-short strategies）、本金中立多空對沖策略（long-short dollar neutral strategy）或市場風險對沖策略（beta hedging strategy）時，將`long_short`（`demeaned`）參數設定為True，選擇demeaned後報酬率，可以更好的觀察各個分組的**相對報酬**，類似超額報酬的概念。
+#
+# - 若預期採用的是**long only strategy**時，則應將`long_short`（`demeaned`）參數設定為False，觀察**絕對報酬率**。
+#
+# 這邊預期採用**long-short strategies**，並將`long_short`（`demeaned`）設定為True（**Alphalens預設就是True**）且後續皆會採用demeaned的平均報酬率進行計算。
+
+# %% [markdown] cell 22
+# ## Performance Metrics & Plotting Functions
+#
+# ### Mean Return by Factor Quantile（by date）
+#
+# 以下利用`mean_return_by_quantile`函數並將`by_date`參數設置為**True**，計算不同時間點下平均報酬率，後續可以用來觀察投資組合報酬率隨時間的變化及計算累計報酬率。
+#
+# #### 平均報酬率：
+# - 若`demeaned`參數設定為True則將每一檔股票的報酬率扣除全市場（所有樣本公司）的平均報酬，得到demeaned後的平均報酬率，消除整體市場波動的影響。（這邊`demeaned`參數的功能與`create_returns_tear_sheet`函數的`long_short`參數功能一致）  
+#
+# - 須注意持有期1日、5日及10日的報酬率計算頻率不同，無法直接比較。
+#
+# > 以factor_quantile=1，持有期=1D，date=2013-01-03為例：
+# > 
+# > ##### 若demeaned=False：
+# > 利用2013-01-03當日所有quantile=1公司計算平均報酬率（簡單平均）。
+# > 
+# > ##### 若demeaned=True：  
+# > 1.先對2013-01-03當日quantile＝1所有公司的報酬率做demeaned：（當日原始的報酬率－當日factor_quantile＝1~5所有公司的平均報酬率）。 
+# > 2.再對上述demeaned後的報酬率做平均，得到quantile＝1當日demeaned後的平均報酬率。
+#
+# #### 平均報酬率標準差：  
+#
+# > 以factor_quantile=1，持有期=1D，date=2013-01-03為例：
+# > 
+# > ##### 若demeaned=False：
+# > σ（quantile=1所有公司在2013-01-03當日的平均報酬率)／${\sqrt {公司數目}}$  
+# > 
+# > ##### 若demeaned=True：
+# > σ（quantile=1所有公司在2013-01-03當日的demeaned後的平均報酬率)／${\sqrt {公司數目}}$  
+
+# %% [code] cell 23
+mean_return_by_q_daily, std_err_by_q_daily = alphalens.performance.mean_return_by_quantile(factor_data, by_date=True)
+
+# %% [code] cell 24
+mean_return_by_q_daily.head()
+
+# %% [code] cell 25
+std_err_by_q_daily.head()
+
+# %% [markdown] cell 26
+# ### Convert returns to one_period_len
+#
+#
+# 因前面提及持有期1日、5日及10日的報酬率計算頻率不同，無法直接比較，故這邊利用 `alphalens.utils.rate_of_return` 將不同持有期的報酬率皆轉為日報酬。
+#
+# #### 平均報酬率頻率轉換：
+# > 利用`rate_of_return`函數針對報酬率計算的基準期做轉換（類似複合成長率CAGR的概念）。  
+# > 
+# > ##### 轉換方式如下：  
+# > 
+# > $ ({轉換前報酬率+1})^{\left({\cfrac{基準期}{原始持有期}}\right)}-1 $  
+# > 
+# > 例如：quantile=1，持有期=10D，date=2013-01-03的報酬率為-0.046771，若基準期為1天，則轉換後報酬率為：$ ({-0.046771+1})^ {1/10}-1 $
+
+# %% [code] cell 27
+mean_return_by_q_daily_convertfreq=mean_return_by_q_daily.apply(alphalens.utils.rate_of_return,
+                                                                axis=0,
+                                                                base_period=mean_return_by_q_daily.columns[0])
+mean_return_by_q_daily_convertfreq.head()
+
+# %% [markdown] cell 28
+# #### 標準差頻率轉換：  
+# > 在`mean_return_by_quantile`函數計算出來的標準差會因為持有期不同而產生頻率不同的情形，為了利於比較，以下利用`std_conversion`函數將標準差做轉換。 
+# > 
+# > ##### 轉換方式如下：  
+# > 
+# > $ {\cfrac{轉換前標準差} {{\sqrt{\cfrac{原始持有期}{基準期}}}}} $ 
+# > 
+# > 例如：quantile=1，持有期=10D，date=2013-01-03的標準差為0.008489，若基準期為1天，則轉換後報酬率為：$ {\cfrac{0.008489} {{\sqrt{\cfrac{10}{1}}}}} $ 
+
+# %% [code] cell 29
+std_err_by_q_daily_convertfreq=std_err_by_q_daily.apply(alphalens.utils.std_conversion,
+                                                        axis=0,
+                                                        base_period=std_err_by_q_daily.columns[0])
+std_err_by_q_daily_convertfreq.head()
+
+# %% [markdown] cell 30
+# ### Mean Return by Factor Quantile
+# 用`mean_return_by_quantile`函數並將`by_date`參數設置為**False**，不考慮時間差異，計算整體的平均報酬率。可以從中了解買入各分組的股票，利用特定持有期持有至期末能獲得的平均報酬，對因子的預測力做初步了解。
+# <!-- 
+# （註：`plot_quantile_returns_bar`函數內部會`utils.rate_of_return`並將不同持有期的報酬率皆轉為日報酬，故可以直接比較） -->
+#
+# #### 平均報酬率：  
+#    
+# > 以quantile=1，持有期=1D為例：
+# > 
+# > ##### 因demeaned=True：  
+# > 1.針對所有quantile=1的公司，計算每一日的demeaned後平均報酬率。  
+# > 2.將每一日的demeaned後平均報酬率再取平均。  
+#
+# #### 平均報酬的標準差：  
+#   
+# > 以factor_quantile=1，持有期=1D為例：
+# >   
+# > ##### 因demeaned=True：
+# > σ（所有quantile=1的公司，每一日demeaned後平均報酬率）／${\sqrt {交易日數}}$  
+
+# %% [code] cell 31
+mean_return_by_q, std_err_by_q = alphalens.performance.mean_return_by_quantile(factor_data,
+                                                                               by_date=False)
+mean_return_by_q.head()
+
+# %% [markdown] cell 32
+# #### 平均報酬率轉換頻率：
+
+# %% [code] cell 33
+mean_return_by_q_convertfreq=mean_return_by_q.apply(alphalens.utils.rate_of_return,
+                                                    axis=0,
+                                                    base_period=mean_return_by_q.columns[0])
+mean_return_by_q_convertfreq
+
+# %% [markdown] cell 34
+# ### Mean Period Wise Return by Factor Quantile
+#
+# 最後將`performance.mean_return_by_quantile`的計算結果利用`plot_quantile_returns_bar`函數將因子平均報酬率畫成柱狀圖。  
+#   
+# 我們通常會希望報酬在不同分組中呈現單調遞增，即bottom quantile（第一組）報酬率最低，top quantile（第五組）報酬率最高。在這種情形下可以透過做多第五組的股票、放空第一組的股票，來建構多空策略。但在這個因子中，並沒有明顯的單調遞增現象。
+#
+# 另一個可以觀察的重點為不同的持有期間對應的平均報酬率，它告訴我們需要持有特定股票多久才可以最大化報酬。
+
+# %% [code] cell 35
+alphalens.plotting.plot_quantile_returns_bar(mean_return_by_q_convertfreq)
+sns.despine()
+
+# %% [markdown] cell 36
+# ### Period Wise Return by Factor Quantile（Violin plots）
+#
+# 小提琴圖結合機率密度函數圖（probability density function plot）及盒鬚圖（box plot）。該圖形可以展示變數的三個四分位數、極值及機率分佈。
+# 可以用來了解因子中噪音的大小。
+
+# %% [code] cell 37
+alphalens.plotting.plot_quantile_returns_violin(mean_return_by_q_daily_convertfreq)
+sns.despine()
+
+# %% [markdown] cell 38
+# ### Top Minus Bottom Quantile Mean Returns
+#
+# #### Mean return spread（by date）
+# 在各因子分組平均報酬率（非時間序列）的結果中可以發現第五組的報酬率最高且第一組的報酬最低，因此可以透過多空對沖策略（等權重配置），做多第五組的股票並同時放空第一組的股票來最大化報酬。
+#
+# 這邊利用`compute_mean_returns_spread`函數將第5組（`upper_quant`參數）平均報酬率減去第1組（`lower_quant`參數）的平均報酬率，得到多空對沖投組平均報酬率（即mean return spread）及其標準差。  
+#
+# ##### 通常會選擇頭尾兩個分組做分別做為top quantile及bottom quantile，不過在Alphalens中也可以使用其他分組進行計算。 
+#
+# > #### 多空對沖平均報酬
+# > 利用各因子分組平均報酬率（by date）計算。
+# > 
+# > 以持有期=10D，date=2013-01-03為例：（當天第五組平均報酬－當天第一組平均報酬）
+# > 
+# > #### 多空對沖平均報酬率的標準差
+# > 利用各因子分組平均報酬率（by date）的標準差計算。
+# > 
+# > 以持有期=10D，date=2013-01-03為例：$\sqrt {（當天第5組平均報酬率的標準差）^2 + （當天第1組平均報酬率的標準差）^2}$
+
+# %% [code] cell 39
+quant_return_spread, std_err_spread = alphalens.performance.compute_mean_returns_spread(mean_return_by_q_daily_convertfreq,
+                                                                                        upper_quant=5,
+                                                                                        lower_quant=1,
+                                                                                        std_err=std_err_by_q_daily_convertfreq)
+quant_return_spread.head()
+
+# %% [code] cell 40
+std_err_spread.head()
+
+# %% [markdown] cell 41
+# 利用`plot_mean_quantile_returns_spread_time_series`函數繪製多空對沖投組平均報酬率（mean return spread）的折線圖，觀察不同期間多空對沖均報酬率的變化。通常會希望得到穩定＞0的曲線，代表多空對沖策略能穩定優於所有樣本公司的平均報酬率。  
+#   
+# 圖中的淺色線代表多空對沖投組的平均報酬率（mean return spread）、深色線代表過去22個交易日的多空對沖平均報酬率（1 month moving avg）、陰影處則代表報酬率的信賴區間。
+#
+#
+# #### 陰影處上下軌（其中，bandwidth預設1）  
+# 上軌 = 當天多空對沖投組平均報酬率 + （當天多空對沖投組平均報酬率的標準差 * bandwidth）  
+# 下軌 = 當天多空對沖投組平均報酬率 - （當天多空對沖投組平均報酬率的標準差 * bandwidth）
+
+# %% [code] cell 42
+alphalens.plotting.plot_mean_quantile_returns_spread_time_series(quant_return_spread,
+                                                                 std_err_spread)
+
+# %% [markdown] cell 43
+# ### Cumulative Return by Quantile
+#
+# 相較於前面提及的平均報酬率，這邊模擬透過等權重方式交易各因子分組中的所有股票，並計算實際報酬率。
+#
+# 這邊我們希望看到不同分組的報酬率走勢呈現發散且各分組的表現呈現單調遞增，即top quantile的報酬率優於bottom quantile。  
+#
+# 此外，在採用多空對沖策略的情形下，會做多top quantile，並同時放空bottom quantile的股票。因此我們希望看到top quantile逐漸上升且bottom quantile的報酬率逐漸下降。（此處top quantile為第5組，bottom quantile為第1組） 
+#
+# #### 累計報酬率計算方式  
+# - 利用`cumulative_returns`函數將同一分組每天的報酬率+1後再做連乘，得到日累計報酬率。  
+# - `performance.cumulative_returns`函數利用`ep.cum_returns(returns, starting_value=1)`做計算。  
+#
+# <!-- 參考http://quantopian.github.io/empyrical/_modules/empyrical/stats.html
+# df_cum = np.exp(np.log1p(returns).cumsum())  
+# log1p = log（x+1）  -->
+#
+# 公式如下： 
+#
+# $$\quad \prod_{t=1}^p {(1+平均報酬率_t)} \quad $$
+
+# %% [code] cell 44
+cum_ret=mean_return_by_q_daily[['1D']].unstack('factor_quantile').apply(alphalens.performance.cumulative_returns)
+cum_ret.head()
+
+# %% [markdown] cell 45
+# 以下利用`plot_cumulative_returns_by_quantile`函數將累計報酬率繪製成折線圖。受限於Alphalens計算累計報酬率的方式，僅呈現持有期為1日的累計報酬率折線圖。  
+#
+# #### 限制：
+# 因這邊使用的為日頻率資料，當持有期為10日時，若要計算20130102至20130103的累計報酬率，則Alphalens計算方式為（1+在20130102時點持有10日的報酬率） ×（1+在20130103時點持有10日的報酬率），但這個計算方式並不恰當。
+
+# %% [code] cell 46
+alphalens.plotting.plot_cumulative_returns_by_quantile(mean_return_by_q_daily['1D'], period='1D')
+sns.despine()
+
+# %% [markdown] cell 47
+# ### Factor weighted Long/Short Portfolio Cumulative Return
+# While looking at quantiles is important we must also look at the factor returns as a whole. The cumulative factor long/short returns plot lets us view the combined effects overtime of our entire factor.
+#
+# 這邊利用`factor_returns`函數模擬了另一種多空對沖策略：以因子值為權重，做多因子值為正的股票，做空因子值為負的股票 ，獲得多空對沖報酬。這個策略納入所有股票池中的股票進行交易，與前面提到的因子分組組別（quantile）無關。若因子皆為正，則會形成一個純做多的投資組合。  
+#
+# 通常實務上進行多空對沖策略時，只會交易top quantile及bottom quantile，但是依然可以利用因子加權的累計報酬率來觀察因子整體預測能力的一致性。若是越一致則以因子加權的方式建立投資組合會更有優勢。
+#
+# #### 因子加權
+# 根據`factor_returns`函數中demeaned參數設定的不同，因子加權投組的權數計算方式可分為以下兩種：
+#
+# > #### demeaned=False（不針對因子値做demeaned處理）
+# > 股票i在時點t權數的計算方式為：將該股票當天的因子值除以當天所有股票因子値取絕對値後的總合。公式如下： 
+# > 
+# > $${權數_{i,t}=}\frac{因子值_{i,t}}{\sum_{i=1}^n  {\mid因子值_{i,t}}\mid}$$ 
+# > 
+# > #### demeaned=True（針對因子値做demeaned處理）
+# > 先計算股票i在時點t的demeaned後因子值，計算方式為：將該股票當天的因子值扣除當天所有股票因子值的平均。公式如下：    
+# > 
+# > $${demeaned後因子值_{i,t}=}{因子值_{i,t}}{-}\frac{{\sum_{i=1}^n{因子值_{i,t}}}}{n}$$ 
+# >   
+# > 接著再計算股票i在時點t權數，公式如下： 
+# > 
+# > $${權數_{i,t}=}\frac{demeaned後因子值_{i,t}}{\sum_{i=1}^n  {\mid demeaned後因子值_{i,t}}\mid}$$ 
+
+# %% [code] cell 48
+ls_factor_returns = alphalens.performance.factor_returns(factor_data)
+ls_factor_returns.head()
+
+# %% [markdown] cell 49
+# 最後將累計報酬率繪製成折線圖。受限於Alphalens計算累計報酬率的方式 ，僅呈現持有期為1日的累計報酬率折線圖。  
+#
+#
+# #### 限制：
+# 因這邊使用的為日頻率資料，當持有期為10日時，若要計算20130102至20130103的累計報酬率，則Alphalens計算方式為（1+在20130102時點持有10日的報酬率） ×（1+在20130103時點持有10日的報酬率），但這個計算方式並不恰當。解決方法為：將原始資料直接調整為月頻率，並且將持有期設定為1，就可以得到月的累計報酬率。
+
+# %% [code] cell 50
+alphalens.plotting.plot_cumulative_returns(ls_factor_returns['1D'], 
+                                           period='1D')
+sns.despine()
+
+# %% [markdown] cell 51
+# ### Alpha and beta
+# Ann. alpha和beta來自於簡單迴歸中的兩個迴歸係數。其中，Ann. alpha需將原始的迴歸係數做年化處理，計算方式為：  
+#
+# $${(1+alpha)^\frac{252}{持有期 }}{ }{-1}$$ 
+#
+# 迴歸的自變數X是全市場的平均報酬率（計算方式是將股票池中所有股票的報酬率取平均），應變數Y是因子加權多空對沖投組的平均報酬率。  
+# （若demeaned參數設定為True則Y利用demeaned後報酬率計算）  
+#
+# 其中，alpha衡量因子加權多空對沖投組所能獲得的超額報酬；beta則衡量該投組暴露於市場風險的程度。
+
+# %% [code] cell 52
+alpha_beta = alphalens.performance.factor_alpha_beta(factor_data)
+alpha_beta
+
+# %% [markdown] cell 53
+# ### Returns table
+# 包含alpha和beta、不同持有期下的top quantile及bottom quantile的平均報酬及多空對沖報酬率的平均值。
+
+# %% [code] cell 54
+alphalens.plotting.plot_returns_table(alpha_beta,
+                                      mean_return_by_q_convertfreq,
+                                      quant_return_spread)
+
+# %% [markdown] cell 55
+# ## Returns Tear Sheet
+#
+# Returns Analysis 所有圖表。
+
+# %% [code] cell 56
+alphalens.tears.create_returns_tear_sheet(factor_data)
+
+# %% [markdown] cell 57
+# # Information Analysis
+#
+# - Information Coefficient（IC）是另一種觀察因子預測性的方法，透過計算**因子值**與**持有期報酬**的**斯皮爾曼等級相關係數（Spearman rank correlation coefficient）**而得。
+# - 簡而言之，IC提供了一種評估方式，來確定較高的因子值是否意味著更高的報酬率，即是否存在單調遞增的關係。因此，理想情況下，**我們希望IC值越高越好**。在主動投資策略中，IC也常被用來評估基金經理人的預測能力。
+# - 由於IC是等級相關係數，其值的範圍是介於+1到-1之間。當IC=1時，意味著該因子完全沒有雜訊，並可以做出完美的預測；IC=0時，表示該因子無預測能力，全為雜訊；若IC值為負時，則代表預測方向與真實方向完全相反，這時我們可以透過調整預測方向來應對。
+# - 那麼，IC值到底要多高才算是好呢？不同的研究或投資人對此有各自的見解。例如，Grinold and Kahn（2000）指出：一個良好的因子其IC值應達到**0.05**；一個出色的因子，其IC值應達到0.10；而一個頂尖的因子，其IC值應達到0.15。然而，如果IC值高達0.20，可能代表存在回測偏差或是非法的內線交易行為。
+# - 然而，這種評判標準會因人或所投資的市場而異，可根據個人需求設定更嚴格或更寬鬆的標準。此外，當存在多個候選因子時，也可以利用IC對它們進行比較，選擇IC值較高的因子。
+#
+# ## Information Analysis vs. Returns Analysis
+# - 在報酬率分析中，我們會按照股票的因子值大小進行分組，然後分析每個分組的報酬率。透過觀察**各分組的報酬率（quantiles return，QR）**，我們可以了解一個因子在股票池中的**預測能力分佈**，例如，某個因子是否只在top quantile的股票中顯示出預測能力，或者它是否對整個股票池都具有預測力。
+# - 資訊係數則是描述因子與其持有期報酬率間線性關係的相關係數。雖然較高的IC值代表該因子具有較佳的預測能力，但由於計算IC時沒有進行樣本分組，我們無法明確知道這預測能力是來自股票池的哪部分。也就是說，一個因子可能只在股票池的某一子集中具有預測效果。
+# - 為了更全面評估一個因子，最好是結合使用兩種分析工具。**IC提供了較為一般化的視角，而QR則提供了更深入的觀點，能夠明確顯示因子在哪些分組中的預測能力最強，以及在哪些分組中效果不那麼明顯**。若僅依賴IC，可能會**遺漏因子在不同股票之間的表現差異**。反之，若只考慮QR而不考量IC，則可能會忽略掉**因子整體的預測強度**。
+#
+# ## Performance Metrics & Plotting Functions
+#
+# ### IC Time Series
+# 利用`factor_information_coefficient`函數計算各持有期下每一日的IC值，觀察因子預測力隨時間變動的情況。
+#
+# #### 計算方式：
+# $${在時點t的IC值（IC_{t, n}）=}{Corr(因子值_{i,t}}{ ,}{持有期報酬率_{i,t,n})}$$
+# - 其中，i為公司、n為持有期、Corr為斯皮爾曼相關係數。
+# - 若date=2013-01-03，持有期=10D：
+#   Corr(date=2013-01-03當天所有股票的**因子值**, date=2013-01-03當天所有股票持有10D的**報酬率**)
+
+# %% [code] cell 58
+ic = alphalens.performance.factor_information_coefficient(factor_data)
+ic.head()
+
+# %% [markdown] cell 59
+# 利用`plotting.plot_ic_ts`函數把不同時點的IC值繪製成折線圖，可以了解因子預測能力隨著時間的變化情況。  
+# - 通常會希望看到IC在時間序列上大部分的時間點皆**穩定為正（甚至＞0.05）**，且**擁有較大的IC均值**以及**較小的IC標準差**。  
+# - 其中，圖中藍色線為每日的IC值；綠色線為近一個月（過去22天）的IC均值；左上角顯示IC均值及IC標準差（利用每日的IC值計算平均數及標準差）。
+# - 近一個月的IC均值計算方式為`ic.rolling(window=22,min_periods=None).mean()`，因此當過去22天的資料中有一筆是NA時，近一個月的IC均值就是NA。
+
+# %% [code] cell 60
+alphalens.plotting.plot_ic_ts(ic)
+
+# %% [markdown] cell 61
+# ### IC Histograms
+#
+#
+# - 利用`plotting.plot_ic_hist`函數將不同持有期的IC序列資料繪製成直方圖觀察IC值的分佈情況（Alphalens利用`seaborn.histplot()`函數繪製）。
+# - 通常會希望有**較高的IC均值**以及**較為集中的分佈（標準差低）**。  
+# - 圖中白色虛線為IC均值；藍色實線為利用kernel density estimate方法估計的機率密度函數。因直方圖受限於長條寬度（bin），而不夠準確。Alphalens將`seaborn.histplot()`的`kde`參數設為True，利用kernel density estimate的方式估計機率密度，得到平滑且連續的結果。
+
+# %% [code] cell 62
+alphalens.plotting.plot_ic_hist(ic)
+
+# %% [markdown] cell 63
+# ### IC Q-Q Plot
+#
+# QQ圖（使用`plot_ic_qq`函數）可以觀察**IC值的機率分配是否近似於常態分配**。以下圖來觀察，若藍色點的分佈大致貼合紅色線（y=x），代表IC的分佈接近常態分配。
+
+# %% [code] cell 64
+alphalens.plotting.plot_ic_qq(ic)
+
+# %% [markdown] cell 65
+# ### Monthly IC Heatmap
+# 將IC值按月取平均。
+
+# %% [code] cell 66
+mean_monthly_ic = alphalens.performance.mean_information_coefficient(factor_data, 
+                                                                     by_time='M')
+mean_monthly_ic.head()
+
+# %% [markdown] cell 67
+# 利用熱區圖觀察因子是否有月份效應。
+
+# %% [code] cell 68
+alphalens.plotting.plot_monthly_ic_heatmap(mean_monthly_ic)
+
+# %% [markdown] cell 69
+# ### Information Coefficient by Year
+# 將IC值按年取平均。
+
+# %% [code] cell 70
+mean_yearly_ic = alphalens.performance.mean_information_coefficient(factor_data,
+                                                                    by_time='1Y')
+mean_yearly_ic.head()
+
+# %% [code] cell 71
+fig = plt.figure(dpi=200)
+mean_yearly_ic.index = mean_yearly_ic.index.year
+mean_yearly_ic.plot.bar(figsize=(8, 4),rot=0,ax=plt.gca())
+plt.tight_layout();
+
+# %% [markdown] cell 72
+# ### Information Table
+# - `IC Mean`（IC均值）：把各持有期下的IC值取平均。  
+#
+#
+# - `IC Std.`（IC標準差）：利用各持有期下的IC值計算樣本標準差。  
+#
+#
+# - `Risk-Adjusted IC`（風險調整後的IC值）：
+#   - = `IC Mean` / `IC Std.`。
+#   - 風險調整後的IC能兼顧因子**選股能力與穩定性**，相較於IC均值，是更好的衡量指標。投資組合的資訊比率（information ratio，IR）大致上等於風險調整後的IC。且因IR的值越大越好，所以風險調整後的IC也是越大越好。（Qian and Hua, 2004）  
+#   - 關於IR的高低標準，不同的研究或投資人對此有各自的看法。例如，Grinold and Kahn（2000）認為好的投資組合IR應達到**0.5**；一個出色的投資組合IR則應達到1.0。而全球知名的資產管理公司富達國際（Fidelity International）認為，IR>=0.4是相對較佳的。
+#
+#
+# - `IC Skew`：
+#   - 利用`scipy.stats.skew()`函數計算IC值的偏態係數（SciPy是一個開源的Python演算法庫和數學工具包）。
+#   - `scipy.stats.skew()`的`bias`參數設定為為True，代表未將利用小樣本資料計算偏態係數造成的偏誤進行修正。
+#   - 常態分配的偏態係數為0（by Fisher’s definition）。[scipy.stats.skew](https://docs.scipy.org/doc/scipy-1.8.0/reference/generated/scipy.stats.skew.html)  
+#
+#
+# - `IC Kurtosis`：
+#   - 利用`scipy.stats.kurtosis()`函數計算IC值的峰態係數。
+#   - `scipy.stats.skew()`的`bias`參數設定為為True，代表未將利用小樣本資料計算峰態係數造成的偏誤進行修正。
+#   - 常態分配的峰態係數為0（by Fisher’s definition）。[scipy.stats.kurtosis](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.kurtosis.html)  
+#
+#
+# - `t-stat(IC)`與`p-value(IC)`：利用`scipy.stats.ttest_lsamp()`，將IC資料進行T檢定，檢驗其是否顯著異於0。
+#   $${檢定統計量=}\frac{IC Mean－0}{\sqrt{\frac {IC Std.}{樣本數}}}$$ 
+
+# %% [code] cell 73
+alphalens.plotting.plot_information_table(ic)
+
+# %% [code] cell 74
+print(stats.skew(ic))  #Alphalens計算的版本
+print(stats.skew(ic, bias=False)) #EXCEL計算的版本
+
+print(stats.kurtosis(ic))  #Alphalens計算的版本
+print(stats.kurtosis(ic, bias=False)) #EXCEL計算的版本
+
+# %% [markdown] cell 75
+# ## Information Tear Sheet
+#
+# Information analysis 所有圖表
+
+# %% [code] cell 76
+alphalens.tears.create_information_tear_sheet(factor_data)
+
+# %% [markdown] cell 77
+# # Turnover Analysis
+#
+#
+# - 因子周轉率間接衡量**因子的穩定性**及**潛在的交易成本**（Aphalens並沒有考慮佣金、滑價等交易成本）。周轉率低的因子能使投資組合不需要頻繁調整持股，也間接代表因子有更好的持續性且享有較低的交易成本。
+# - 在過往文獻中，Carhart（1997）和Champagne, Karoui and Patel（2018）都發現，周轉率越高的共同基金績效就越差。因此，過高的周轉率會侵蝕投資策略的獲利，並且無論該筆交易最終結果是賺錢或賠錢，都需要支付因周轉率高而產生的成本，這是不可忽視的。
+# - 除此之外，周轉率也會隨**因子的資訊時域**不同而有所差異。
+#   - 資訊時域（**也稱為shelf life或information horizon**），資訊時域指的是利用特定因子資訊所能預測的時間範圍。有些因子的訊號可能在幾天內迅速消失，而有些則可能持續一年仍保有其預測能力（Grinold and Kahn, 2000）。
+#   - 如果一個因子具有相對短的資訊時域（例如短期反轉因子），代表它只能預測短期內的股價報酬，這樣的因子訊號會迅速衰減（signal decays），導致較高周轉率，因為我們需要不斷調整投資部位。如果一個因子具有相對長的資訊時域（例如基本面因子），因子訊號衰減速度就會較慢，周轉率也會相對較低（Qian, Sorensen and Hua, 2007）。
+# - Alphalens中提供了周轉率分析的兩種工具（**因子周轉率及因子自我相關係數**）供我們使用。在有多個候選因子的情形下，我們可以利用這些工具作為因子選擇標準之一。而當我們在實際回測中使用某個因子時，我們也可以利用這些工具來考慮要使用哪一種再平衡方案。
+#
+#
+# ## 因子周轉率 Turnover
+# 第N組（quantile）在時點t的周轉率 = 本期在第N組但前P期不在這一組的股票數量／本期在第N組的股票數量
+# - 若資料為日頻率且持有期為10日，則前P期就代表前10日。
+# - 根據上述公式，若資料為日頻率且持有期為10日，則前P期即代表前10日。若某一組的周轉率為5%，這意味著在10天前屬於這個分組的股票，有5%已經不再屬於這個分組。
+# - 周轉率本身沒有固定的標準來判定其理想範圍，有些經理人可能會設定特定的投資政策，例如：投資組合周轉率不得超過20%。此外，投資風格也會影響周轉率。當有多個同風格的因子時，可比較它們的周轉率，並在IC值相近時，優先選擇周轉率較低的因子。
+#
+#         
+# ## 因子自我相關係數 Autocorrelation
+# - 因子自我相關係數衡量**當期因子值排序**與**前一期因子值排序**的相關程度。
+# - **周轉率與自我相關係數呈現負相關**。因此，因子自我相關係數提供了另一種衡量因子周轉率的方式。如果自我相關性低，這意味著因子的當前排序與之前的排序關聯度不大，所以投資組合可能需要頻繁調整持股，導致高周轉率。而自我相關性高則代表因子在不同時期之間存在較大的相關性和穩定性（儘管這不會影響其預測價格變動的能力）。所以**自我相關係數可以與因子周轉率相互印證。**
+# - 計算因子自我相關的公式：  
+#
+#   $${在時點t的自我相關係數 =}{Corr(因子值_{i,t}}{ ,}{因子值_{i,t-p})}$$  
+#   $$$$
+#   - 其中，i代表公司，p是持有期，Corr表示斯皮爾曼相關係數。
+#   - 若資料為日頻率且持有期為10日，則前P期就代表前10日。  
+#   
+# ## Performance Metrics & Plotting Functions
+#
+# ### Quantile Turnover
+# `quantile_turnover`函數計算第N組周轉率的公式為：本期在第N組但前P期不在這一組的資產數量／本期在第N組的資產數量。
+#
+# - P由period參數控制。若資料為日頻率且period＝10，則前P期就代表前10日；通常period會設定與持有期相同。  
+# - N由quantile參數來指定。若quantile＝1則計算第1組的周轉率。 
+# - 通常隨著**持有期的增長**，**周轉率也相應上升**，而周轉率的波動性亦增加。這是因為較長的時間間隔會帶來更多的新資訊，因此投資組合於**每一次再平衡**時需要進行更頻繁的調整。**這並不意味著持有期越短越好**，因為持有期=1D，就代表需要每天再平衡，一年以252天來算，就要換股252次。
+#
+# 以下計算持有期=1d的周轉率：
+
+# %% [code] cell 78
+quantile_turnover =\
+{
+        HOLDING_PERIODS: pd.concat([alphalens.performance.quantile_turnover(factor_data['factor_quantile'],
+                                                           quantile=quantile,
+                                                           period=HOLDING_PERIODS)
+             for quantile in factor_data.factor_quantile.sort_values().unique().tolist()],axis=1,)
+        for HOLDING_PERIODS in (1, 5, 10)
+        }
+
+quantile_turnover
+
+# %% [markdown] cell 79
+# 將因子周轉率繪製成折線圖，觀察在時序列上的變化。
+# - 在此，我們只繪製**top quantile**與**bottom quantile**的周轉率。
+# - 這是因為在因子投資中，我們通常會做多top quantile並同時放空bottom quantile來建構多空對沖投組，或是僅做多top quantile來建立純做多投組。因此，這兩個分組尤為重要。
+
+# %% [code] cell 80
+for HOLDING_PERIODS in (1, 5, 10):
+    alphalens.plotting.plot_top_bottom_quantile_turnover(quantile_turnover[HOLDING_PERIODS],
+                                                         period=HOLDING_PERIODS)
+    plt.tight_layout()
+
+# %% [markdown] cell 81
+# ### Factor Rank Autocorrelation
+# 利用`factor_rank_autocorrelation()`函數計算因子自我相關係數。
+
+# %% [code] cell 82
+factor_rank_autocorrelation=pd.DataFrame()
+for HOLDING_PERIODS in (1, 5, 10):
+    factor_rank_autocorrelation=pd.concat([factor_rank_autocorrelation,
+                                           (alphalens.performance.factor_rank_autocorrelation(factor_data,
+                                                                                              period=HOLDING_PERIODS))],
+                                          axis=1
+                                         )
+factor_rank_autocorrelation.head(15)
+
+# %% [markdown] cell 83
+# 將不同持有期的因子自我相關係數繪製成折線圖，觀察在時序列上的變化。同時折線圖左上角也呈現**平均自我相關係數**。
+
+# %% [code] cell 84
+for HOLDING_PERIODS in (1, 5, 10):
+    alphalens.plotting.plot_factor_rank_auto_correlation(factor_rank_autocorrelation[HOLDING_PERIODS],
+                                                         period=HOLDING_PERIODS)
+    plt.tight_layout()
+
+# %% [markdown] cell 85
+# ### Turnover table
+
+# %% [code] cell 86
+alphalens.plotting.plot_turnover_table(factor_rank_autocorrelation,
+                                       quantile_turnover)
+
+# %% [markdown] cell 87
+# ## Turnover Tear Sheet
+#
+# 所有 Turnover analysis 圖表
+
+# %% [code] cell 88
+alphalens.tears.create_turnover_tear_sheet(factor_data)
+
+# %% [markdown] cell 89
+# # Groupwise Performance
+#
+# 若提供群集資料(比如: 產業類別)，可以透過加入 `by_group=True` 根據不同群集繪製出不同因子分析圖表。
+
+# %% [markdown] cell 90
+# ### IC by sector
+
+# %% [code] cell 91
+ic_by_sector = alphalens.performance.mean_information_coefficient(factor_data, 
+                                                                  by_group=True)
+ic_by_sector.head()
+
+# %% [code] cell 92
+alphalens.plotting.plot_ic_by_group(ic_by_sector)
+
+# %% [markdown] cell 93
+# ### Mean return quantile by sector
+
+# %% [code] cell 94
+mean_return_quantile_sector, mean_return_quantile_sector_err = alphalens.performance.mean_return_by_quantile(factor_data, 
+                                                                                                             by_group=True)
+mean_return_quantile_sector.head()
+
+# %% [markdown] cell 95
+# 平均報酬率轉換：
+
+# %% [code] cell 96
+mean_return_quantile_sector_convertfreq=mean_return_quantile_sector.apply(alphalens.utils.rate_of_return,
+                                                                          axis=0,
+                                                                          base_period=mean_return_quantile_sector.columns[0])
+mean_return_quantile_sector_convertfreq.head()
+
+# %% [code] cell 97
+alphalens.plotting.plot_quantile_returns_bar(mean_return_quantile_sector_convertfreq, 
+                                             by_group=True);
+
+# %% [markdown] cell 98
+# # Summary Tear Sheet
+#
+# 匯出重點圖表 (請下載此檔案自行執行)
+
+# %% [code] cell 99
+# alphalens.tears.create_summary_tear_sheet(factor_data)
+
+# %% [markdown] cell 100
+# # The Whole Thing
+#
+# 一次匯出所有圖表 (請下載此檔案自行執行)
+
+# %% [code] cell 101
+# alphalens.tears.create_full_tear_sheet(factor_data)
