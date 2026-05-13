@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Auto-regenerate .py siblings whenever .ipynb files are staged.
+#
+# Install via:
+#   tools/hooks/install.sh
+# or manually:
+#   ln -sf ../../tools/hooks/pre-commit .git/hooks/pre-commit
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+# Collect staged .ipynb files (Added/Copied/Modified/Renamed); ignore deletions.
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR -z \
+    | tr '\0' '\n' \
+    | grep -E '\.ipynb$' \
+    | grep -v '/\.ipynb_checkpoints/' \
+    || true)
+
+if [ ${#staged[@]} -eq 0 ]; then
+    exit 0
+fi
+
+echo "[ipynb->py hook] regenerating .py for ${#staged[@]} notebook(s)..."
+python3 tools/ipynb_to_py.py --files "${staged[@]}"
+
+# Re-stage every generated .py so the commit captures the sync.
+for nb in "${staged[@]}"; do
+    py="${nb%.ipynb}.py"
+    if [ -f "$py" ]; then
+        git add -- "$py"
+    fi
+done
+
+echo "[ipynb->py hook] done."

@@ -9,6 +9,7 @@
 - **M2** — 對全 repo 跑一次，產生 77 個 `.py` 檔
 - **M3** — Spot-check 4 個輸出檔的語法 + commit
 - **M4** — 寫 `tools/check_converted_py.py` 並對全部 77 個輸出跑全量 py_compile + magic-leak 檢查
+- **M5** — Pre-commit hook：當 `.ipynb` 被 stage 時自動重生對應 `.py` 並一起 commit
 
 ## 進度日誌
 
@@ -42,6 +43,29 @@
   python3 tools/check_converted_py.py lecture   # 只掃子目錄
   ```
 
+### M5 — Pre-commit hook 同步 `.ipynb` ↔ `.py`
+- 在 `tools/ipynb_to_py.py` 新增 `--files <ipynb...>` 模式，允許 hook 對單一檔案而非整個 root 跑轉換；原 root walk 模式維持不變
+- 寫了 `tools/hooks/pre-commit`：
+  - 用 `git diff --cached --name-only --diff-filter=ACMR` 抓出本次要 commit 的 `.ipynb`（自動略過 deletion 與 `.ipynb_checkpoints/`）
+  - 呼叫 `python3 tools/ipynb_to_py.py --files <staged>` 重生對應 `.py`
+  - 對每個重生出來的 `.py` 跑 `git add`，讓它們一起進 commit
+- 寫了 `tools/hooks/install.sh`：把 `tools/hooks/pre-commit` symlink 進 `.git/hooks/pre-commit`（idempotent，已存在的非 symlink hook 會 backup）
+- 為什麼放 `tools/hooks/` 而不是直接寫 `.git/hooks/`：`.git/` 不會被 tracked，所以實際 hook 內容必須住在 repo 內、由使用者 opt-in 安裝
+- End-to-end 測試（在 `Aroon.ipynb` 加 markdown cell → `git add` → 手動跑 hook）：
+  - hook 偵測到 staged ipynb、轉換成功、`Aroon.py` sha 改變、被自動 stage
+  - `git restore` 後 sha 還原 → 流程乾淨可逆
+
+#### 安裝指令
+```bash
+tools/hooks/install.sh
+# 之後 git commit 任何 .ipynb 變更時，對應的 .py 會被自動重生並 stage
+```
+
+#### 手動安裝（不想跑 install.sh）
+```bash
+ln -sf ../../tools/hooks/pre-commit .git/hooks/pre-commit
+```
+
 ## Fallback 指引
 
 若要回退：
@@ -60,8 +84,14 @@ python3 tools/ipynb_to_py.py .
 python3 tools/ipynb_to_py.py lecture
 ```
 
+若要解除 pre-commit hook：
+```bash
+rm .git/hooks/pre-commit
+```
+
 ## 已知限制 / 後續
 
 - 沒處理 cell outputs（刻意丟掉，保持 .py 乾淨）
 - magics 一律註解；若 `.py` 要直接執行（不是 import），自行把 `# !zipline ingest` 還原成 shell call
-- 若日後 ipynb 更新，須手動重跑轉換器；可考慮加 pre-commit hook
+- Pre-commit hook 只看 staged 檔案；若 ipynb 被改但沒 `git add`，hook 不會跑（與 git 標準行為一致）
+- Hook 是 opt-in（要跑 `tools/hooks/install.sh`）；考慮日後在 CI 加一道「`.ipynb` 與 `.py` 必須同步」的檢查，搭配本 hook 形成雙保險

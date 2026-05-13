@@ -52,22 +52,37 @@ def convert(src: Path, dst: Path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument('root', nargs='?', default='.', help='Repo root to scan')
+    ap.add_argument('root', nargs='?', default='.', help='Repo root to scan (ignored if --files given)')
+    ap.add_argument('--files', nargs='+', metavar='IPYNB', help='Convert only the listed notebooks instead of walking root')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
 
-    root = Path(args.root).resolve()
-    notebooks = sorted(p for p in root.rglob('*.ipynb') if '.ipynb_checkpoints' not in p.parts)
-    if not notebooks:
-        print(f'No .ipynb under {root}', file=sys.stderr)
-        return 1
+    if args.files:
+        notebooks = [Path(f).resolve() for f in args.files]
+        bad = [p for p in notebooks if p.suffix != '.ipynb' or not p.exists()]
+        if bad:
+            for p in bad:
+                print(f'ERR not an existing .ipynb: {p}', file=sys.stderr)
+            return 1
+        base = Path.cwd().resolve()
+    else:
+        base = Path(args.root).resolve()
+        notebooks = sorted(p for p in base.rglob('*.ipynb') if '.ipynb_checkpoints' not in p.parts)
+        if not notebooks:
+            print(f'No .ipynb under {base}', file=sys.stderr)
+            return 1
 
     converted = 0
     for nb in notebooks:
         py = nb.with_suffix('.py')
-        rel = nb.relative_to(root)
+        try:
+            rel = nb.relative_to(base)
+            rel_py = py.relative_to(base)
+        except ValueError:
+            rel = nb
+            rel_py = py
         if args.dry_run:
-            print(f'[dry] {rel} -> {py.relative_to(root)}')
+            print(f'[dry] {rel} -> {rel_py}')
             continue
         try:
             convert(nb, py)
