@@ -10,6 +10,7 @@
 - **M3** — Spot-check 4 個輸出檔的語法 + commit
 - **M4** — 寫 `tools/check_converted_py.py` 並對全部 77 個輸出跑全量 py_compile + magic-leak 檢查
 - **M5** — Pre-commit hook：當 `.ipynb` 被 stage 時自動重生對應 `.py` 並一起 commit
+- **M6** — CI sync check：GitHub Actions 跑 `tools/check_ipynb_py_sync.py` + `tools/check_converted_py.py`，作為 pre-commit hook 的雙保險
 
 ## 進度日誌
 
@@ -66,6 +67,38 @@ tools/hooks/install.sh
 ln -sf ../../tools/hooks/pre-commit .git/hooks/pre-commit
 ```
 
+### M6 — CI sync check (GitHub Actions)
+- Pre-commit hook 是 opt-in，使用者沒裝就會漏；CI 是強制守門員，補上這道
+- 重構 `tools/ipynb_to_py.py`：把 `convert()` 拆成 `convert_to_str()`（純函式，回字串）+ `convert()`（呼叫前者寫檔）。對外行為不變；新增 import 點供 sync checker 復用同一份產生邏輯，避免轉換器與檢查器各自一份規則導致漂移
+- 新增 `tools/check_ipynb_py_sync.py`：
+  - 對每個 `.ipynb` 用 `convert_to_str()` 重產 expected text，與磁碟上 `.py` 做 byte-for-byte 比較
+  - 不一致時印 unified diff（預設前 20 行，可 `--no-diff` 關閉）
+  - Exit 0 = 全部同步；Exit 2 = 有 missing/drift；Exit 1 = usage error
+  - 純 stdlib，CI 不需要 pip install
+- 新增 `.github/workflows/ipynb-py-sync.yml`：
+  - Trigger：`push` / `pull_request`，只在 `.ipynb` / `.py` / `tools/**` / 本 workflow 自己變動時跑
+  - Steps：checkout → setup-python 3.11 → `check_ipynb_py_sync.py` → `check_converted_py.py`
+  - 任一檢查失敗 CI 就紅，PR 無法合
+- 本地驗證：
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → `In sync: 77/77`，exit 0
+  - 故意 append 一行進 `Aroon.py` 模擬 drift → exit 2 + 報出 `DRIFT: Aroon.ipynb`，還原後 exit 0
+  - Refactor 後 `python3 tools/ipynb_to_py.py --files Aroon.ipynb` + `check_converted_py.py` 仍全綠
+
+#### 用法
+```bash
+# Local — 在 commit / push 前自己跑
+python3 tools/check_ipynb_py_sync.py             # 預設掃當前目錄
+python3 tools/check_ipynb_py_sync.py --quiet     # 只印 summary
+python3 tools/check_ipynb_py_sync.py --no-diff   # 印 DRIFT 路徑但不印 diff 內文
+python3 tools/check_ipynb_py_sync.py lecture     # 只掃子目錄
+```
+
+#### 失敗時怎麼修
+```bash
+python3 tools/ipynb_to_py.py .          # 重生全部 .py
+git add '**/*.py'                       # 把更新後的 .py 一起 commit
+```
+
 ## Fallback 指引
 
 若要回退：
@@ -89,9 +122,17 @@ python3 tools/ipynb_to_py.py lecture
 rm .git/hooks/pre-commit
 ```
 
+若要關掉 CI sync check：
+```bash
+rm .github/workflows/ipynb-py-sync.yml
+# 或在 workflow 中加 `if: false` 暫停（commit 進去再 push）
+```
+
 ## 已知限制 / 後續
 
 - 沒處理 cell outputs（刻意丟掉，保持 .py 乾淨）
 - magics 一律註解；若 `.py` 要直接執行（不是 import），自行把 `# !zipline ingest` 還原成 shell call
 - Pre-commit hook 只看 staged 檔案；若 ipynb 被改但沒 `git add`，hook 不會跑（與 git 標準行為一致）
-- Hook 是 opt-in（要跑 `tools/hooks/install.sh`）；考慮日後在 CI 加一道「`.ipynb` 與 `.py` 必須同步」的檢查，搭配本 hook 形成雙保險
+- Hook 是 opt-in（要跑 `tools/hooks/install.sh`）；M6 已補上 CI sync check 形成雙保險
+- M6 的 workflow yaml 已 commit 進 repo，但要等到首次 `git push` 後 GitHub Actions 才會真正執行第一次（夜間 cron 不會 push）
+- CI 採嚴格 byte-for-byte 比對；若日後改 `ipynb_to_py.py` 的 HEADER / CELL_SEP / sanitize 規則，要同步把全部 `.py` 重生並 commit，否則 CI 會紅

@@ -32,7 +32,8 @@ def _sanitize_code(text: str) -> str:
     return '\n'.join(out) + ('\n' if not text.endswith('\n') else '')
 
 
-def convert(src: Path, dst: Path) -> None:
+def convert_to_str(src: Path) -> str:
+    """Return the .py text that would be written for src, without touching disk."""
     nb = json.loads(src.read_text(encoding='utf-8'))
     parts = [HEADER.format(src=src.name)]
     for i, cell in enumerate(nb.get('cells', [])):
@@ -47,7 +48,11 @@ def convert(src: Path, dst: Path) -> None:
             parts.append(_sanitize_code(source))
         else:
             parts.append(_comment_block(source))
-    dst.write_text(''.join(parts), encoding='utf-8')
+    return ''.join(parts)
+
+
+def convert(src: Path, dst: Path) -> None:
+    dst.write_text(convert_to_str(src), encoding='utf-8')
 
 
 def main() -> int:

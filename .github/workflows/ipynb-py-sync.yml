@@ -1,0 +1,34 @@
+name: ipynb-py-sync
+
+on:
+  push:
+    paths:
+      - '**/*.ipynb'
+      - '**/*.py'
+      - 'tools/**'
+      - '.github/workflows/ipynb-py-sync.yml'
+  pull_request:
+    paths:
+      - '**/*.ipynb'
+      - '**/*.py'
+      - 'tools/**'
+      - '.github/workflows/ipynb-py-sync.yml'
+
+jobs:
+  check:
+    name: Check .ipynb / .py siblings in sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify .py siblings are regenerable + in sync with .ipynb
+        run: python3 tools/check_ipynb_py_sync.py
+
+      - name: Verify .py siblings compile and contain no IPython magic leaks
+        run: python3 tools/check_converted_py.py
