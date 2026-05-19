@@ -1,0 +1,18 @@
+# Auto-generated .py siblings of .ipynb notebooks.
+#
+# These files are produced by `tools/ipynb_to_py.py` and kept byte-for-byte
+# in sync with the source notebooks via:
+#   - tools/hooks/pre-commit  (local, opt-in)
+#   - .github/workflows/ipynb-py-sync.yml  (CI gate)
+#
+# Marking them as linguist-generated makes GitHub:
+#   1. collapse the diff in PR review (notebooks already show the change)
+#   2. exclude them from the repo language statistics
+#
+# See docs/progress-ipynb-to-py.md for the full design.
+
+*.py linguist-generated=true
+
+# Hand-written tooling lives under tools/ — override the default so its
+# diffs stay visible and it still counts toward language stats.
+tools/**/*.py linguist-generated=false

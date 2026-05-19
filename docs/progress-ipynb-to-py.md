@@ -11,6 +11,7 @@
 - **M4** — 寫 `tools/check_converted_py.py` 並對全部 77 個輸出跑全量 py_compile + magic-leak 檢查
 - **M5** — Pre-commit hook：當 `.ipynb` 被 stage 時自動重生對應 `.py` 並一起 commit
 - **M6** — CI sync check：GitHub Actions 跑 `tools/check_ipynb_py_sync.py` + `tools/check_converted_py.py`，作為 pre-commit hook 的雙保險
+- **M7** — `.gitattributes` 把 77 個生成 `.py` 標為 `linguist-generated=true`，讓 GitHub PR diff 收合 + 不計入語言統計
 
 ## 進度日誌
 
@@ -99,6 +100,31 @@ python3 tools/ipynb_to_py.py .          # 重生全部 .py
 git add '**/*.py'                       # 把更新後的 .py 一起 commit
 ```
 
+### M7 — `.gitattributes` 標記生成檔
+- 問題：77 個生成 `.py` 共 30,251 行，沒有特別標記的話 GitHub 會
+  1. 在每個 notebook PR 把 diff 撐成兩倍（既看 `.ipynb` 又看 `.py`）
+  2. 把這些「假 Python」算進 repo 的語言統計，蓋過真正的 tooling code
+- 解法：新增 `.gitattributes` 用 inclusive default + 反向 override：
+  ```
+  *.py linguist-generated=true
+  tools/**/*.py linguist-generated=false
+  ```
+  GitHub Linguist 規則：後寫的 pattern 覆蓋前面的，所以根目錄／`Problem/`／`example/`／`lecture/` 下的 `.py` 全部視為 generated；`tools/**/*.py`（3 個手寫工具）保留正常 diff 與語言統計
+- 為什麼用「全部 generated + tools 例外」而非「明列 generated 目錄」：新增 notebook 不用改 `.gitattributes`，convention-over-configuration；缺點是若有人之後在 tools/ 以外手寫 `.py`，要記得加 override
+- 本地驗證：
+  ```bash
+  git check-attr linguist-generated Aroon.py
+  # → Aroon.py: linguist-generated: true
+
+  git check-attr linguist-generated tools/ipynb_to_py.py
+  # → tools/ipynb_to_py.py: linguist-generated: false
+  ```
+  跨中英檔名（含 `lecture/10分鐘體驗.py`、`example/TQ_期貨策略範例.py`）都正確解析
+- 注意：`linguist-generated` 影響的是 GitHub UI；本地 `git diff`、`tools/check_ipynb_py_sync.py` 的 byte-for-byte 比對、CI sync check 全部維持不變
+- 沒做的事（保留 reviewer 看 diff 的彈性）：
+  - 沒設 `merge=ours`：notebook 兩支分支各自編輯時還是會正常衝突，不會被 silent overwrite
+  - 沒設 `diff=python`：與 `linguist-generated=true` 會衝突，且 PR 用不到（GitHub 已收合）
+
 ## Fallback 指引
 
 若要回退：
@@ -126,6 +152,12 @@ rm .git/hooks/pre-commit
 ```bash
 rm .github/workflows/ipynb-py-sync.yml
 # 或在 workflow 中加 `if: false` 暫停（commit 進去再 push）
+```
+
+若要讓 GitHub 重新把生成 `.py` 算進語言統計 / 展開 PR diff：
+```bash
+rm .gitattributes
+# 或只刪掉 *.py 那兩行
 ```
 
 ## 已知限制 / 後續
