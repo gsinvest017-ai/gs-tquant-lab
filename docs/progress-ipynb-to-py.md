@@ -12,6 +12,7 @@
 - **M5** — Pre-commit hook：當 `.ipynb` 被 stage 時自動重生對應 `.py` 並一起 commit
 - **M6** — CI sync check：GitHub Actions 跑 `tools/check_ipynb_py_sync.py` + `tools/check_converted_py.py`，作為 pre-commit hook 的雙保險
 - **M7** — `.gitattributes` 把 77 個生成 `.py` 標為 `linguist-generated=true`，讓 GitHub PR diff 收合 + 不計入語言統計
+- **M8** — Unit tests `tools/tests/test_ipynb_to_py.py`：用 stdlib `unittest` 為 `_comment_block` / `_sanitize_code` / `convert_to_str` 補 edge case 覆蓋，並在 CI workflow 加上 `python3 -m unittest discover -s tools/tests`
 
 ## 進度日誌
 
@@ -125,6 +126,37 @@ git add '**/*.py'                       # 把更新後的 .py 一起 commit
   - 沒設 `merge=ours`：notebook 兩支分支各自編輯時還是會正常衝突，不會被 silent overwrite
   - 沒設 `diff=python`：與 `linguist-generated=true` 會衝突，且 PR 用不到（GitHub 已收合）
 
+### M8 — Unit tests for the converter
+- 為什麼補：M1~M4 只用 77 個 notebook 做 smoke test，從沒驗證 edge case；之後若要動 `HEADER` / `CELL_SEP` / sanitize regex，沒有快速回饋
+- 新增 `tools/tests/test_ipynb_to_py.py`（純 stdlib `unittest`，0 額外依賴），31 個 case 分三組：
+  - **`_comment_block`** — 單行 / 多行 / 中夾空行 / 空字串 fallback 到 `#`
+  - **`_sanitize_code`** — 純程式碼、`!` shell magic、`%` line magic、`%%` cell magic、`?prefix` / `suffix?` / `obj??`、縮排 magic、混合 magic + code
+  - **`convert_to_str`** — 空 notebook、header 含 src 檔名、code/markdown/raw cell、空 source 跳過但保留 index、source 為 list of str、cell marker 含 kind+idx、未知 cell type fallback、cell 順序保留、缺 `cell_type` 預設 unknown、缺 `source` 跳過、idempotent
+- **發現 + lock 進 test 的真實 quirk**：`_sanitize_code` 的 trailing newline 處理不對稱
+  - input 沒 `\n` → output **有** `\n`
+  - input 一個 `\n` → output **沒** `\n`（`splitlines()` 吃掉，`if not endswith('\n')` 分支不補）
+  - 雙 `\n` → 一個 `\n`
+  - 為什麼不修：77 個 generated `.py` 都依賴此行為通過 byte-for-byte CI；改 sanitize 規則會強制 regen 全部 77 檔 + diff 噪音
+  - 補在 test 名稱 `test_trailing_newline_stripped_when_present` 內，附 docstring 解釋為何 lock 進 test
+- 改 `.github/workflows/ipynb-py-sync.yml`：在 sync / compile check **之前**多一步 `python3 -m unittest discover -s tools/tests -v`；轉換器壞了會在最便宜的層級先紅
+- 不需要 `__init__.py`：unittest discover 從 3.3 開始支援 namespace package；`__pycache__/` 已在 `.gitignore`
+- 本地驗證：
+  - `python3 tools/tests/test_ipynb_to_py.py -v` → `Ran 31 tests in 0.007s OK`
+  - `python3 -m unittest discover -s tools/tests -v` → 同樣 31 OK
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 仍 77/77
+  - `python3 tools/check_converted_py.py --quiet` → 仍 77/77
+
+#### 用法
+```bash
+# 跑全部 unit test
+python3 tools/tests/test_ipynb_to_py.py
+python3 tools/tests/test_ipynb_to_py.py -v        # verbose
+python3 -m unittest discover -s tools/tests       # discover mode（CI 用這個）
+
+# 跑單一 test class
+python3 -m unittest tools.tests.test_ipynb_to_py.SanitizeCodeTests
+```
+
 ## Fallback 指引
 
 若要回退：
@@ -160,6 +192,12 @@ rm .gitattributes
 # 或只刪掉 *.py 那兩行
 ```
 
+若要拔掉 unit tests：
+```bash
+rm -r tools/tests
+# 並把 .github/workflows/ipynb-py-sync.yml 的 "Run unit tests" step 刪掉
+```
+
 ## 已知限制 / 後續
 
 - 沒處理 cell outputs（刻意丟掉，保持 .py 乾淨）
@@ -168,3 +206,4 @@ rm .gitattributes
 - Hook 是 opt-in（要跑 `tools/hooks/install.sh`）；M6 已補上 CI sync check 形成雙保險
 - M6 的 workflow yaml 已 commit 進 repo，但要等到首次 `git push` 後 GitHub Actions 才會真正執行第一次（夜間 cron 不會 push）
 - CI 採嚴格 byte-for-byte 比對；若日後改 `ipynb_to_py.py` 的 HEADER / CELL_SEP / sanitize 規則，要同步把全部 `.py` 重生並 commit，否則 CI 會紅
+- `_sanitize_code` 的 trailing-newline 不對稱已 lock 進 M8 的 unit test（見 `test_trailing_newline_stripped_when_present`）。若要把它「修正」成 always-trailing-newline，必須同時 regen 全部 77 個 `.py` 並更新 test 預期

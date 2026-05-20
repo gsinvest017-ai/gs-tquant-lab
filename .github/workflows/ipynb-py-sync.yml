@@ -27,6 +27,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Run unit tests for converter
+        run: python3 -m unittest discover -s tools/tests -v
+
       - name: Verify .py siblings are regenerable + in sync with .ipynb
         run: python3 tools/check_ipynb_py_sync.py
 
