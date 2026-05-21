@@ -13,6 +13,7 @@
 - **M6** — CI sync check：GitHub Actions 跑 `tools/check_ipynb_py_sync.py` + `tools/check_converted_py.py`，作為 pre-commit hook 的雙保險
 - **M7** — `.gitattributes` 把 77 個生成 `.py` 標為 `linguist-generated=true`，讓 GitHub PR diff 收合 + 不計入語言統計
 - **M8** — Unit tests `tools/tests/test_ipynb_to_py.py`：用 stdlib `unittest` 為 `_comment_block` / `_sanitize_code` / `convert_to_str` 補 edge case 覆蓋，並在 CI workflow 加上 `python3 -m unittest discover -s tools/tests`
+- **M9** — Orphan `.py` detection：擴充 `tools/check_ipynb_py_sync.py` 加 `_orphan_py()`，掃出沒有對應 `.ipynb` 的孤兒 `.py`（notebook 被刪/改名但 `.py` 留下的狀況），補 9 個 unit test 進 `tools/tests/test_check_ipynb_py_sync.py`
 
 ## 進度日誌
 
@@ -157,6 +158,58 @@ python3 -m unittest discover -s tools/tests       # discover mode（CI 用這個
 python3 -m unittest tools.tests.test_ipynb_to_py.SanitizeCodeTests
 ```
 
+### M9 — Orphan `.py` detection
+- 為什麼補：M6 的 `check_ipynb_py_sync.py` 只 walk `.ipynb`，所以「`.ipynb` 被刪除/改名、但 `.py` 留下」這種 stale orphan 完全偵測不到 — sync check 不會看見、`check_converted_py.py` 也只從 ipynb 端 iterate。CI 與 pre-commit hook 都有這個盲點
+- 解法：在 `check_ipynb_py_sync.py` 加 `_orphan_py(root)` helper：
+  - `rglob('*.py')` 找全部 `.py`
+  - 排除 skip dirs：`.git` / `.github` / `.ipynb_checkpoints` / `__pycache__` / `.venv` / `venv`
+  - 排除 handwritten 區（`tools/` 之下）：與 M7 的 `.gitattributes` 規則 (`tools/**/*.py linguist-generated=false`) 對齊
+  - 若 `.py` 旁邊沒有同名 `.ipynb` 就視為 orphan
+  - 回傳 root-relative `Path` list，並依 pathlib `_parts` tuple 排序（同 prefix 時 directory 內容先於同層檔案，例如 `a/c.py` < `a.py`）
+- `main()` 整合：
+  - `bad = missing + drift + errors + orphans`（用 union 算總壞數，避免 orphan 重複計入 in-sync）
+  - Summary 多印一行 `Orphan .py (no .ipynb): N`
+  - non-quiet 模式對每筆印 `ORPHAN: <path> (no matching .ipynb — delete it or restore the notebook)`
+  - 退出時若有 orphan 額外印「delete the stale .py or restore the missing .ipynb」提示
+  - Exit code 仍是 2（與 missing/drift 同等對待）
+- Smoke test（手動，無汙染 repo）：
+  - Clean: `check_ipynb_py_sync.py --quiet` → `In sync: 77/77`、`Orphan .py: 0`、exit 0
+  - Inject `example/stale_orphan.py` → exit 2，列出 `ORPHAN: example/stale_orphan.py`
+  - 刪除後再跑 → exit 0、orphan count 0
+- Unit test `tools/tests/test_check_ipynb_py_sync.py`（純 stdlib `unittest`，9 cases，全部用 `tempfile.TemporaryDirectory()` 隔離）：
+  - 空目錄 → 0 orphan
+  - 配對 `.ipynb`+`.py` → 0 orphan
+  - 純 `.py`（root 與子目錄各一）→ 各自被偵測
+  - `tools/` 下任何 `.py`（含 `tools/tests/`、`tools/hooks/`）→ 永遠不視為 orphan
+  - 全部 skip dir（`.git` / `.github` / `.ipynb_checkpoints` / `__pycache__` / `.venv` / `venv`） → 永遠不視為 orphan
+  - 排序順序 lock 進 test（含 docstring 說明 pathlib parts-tuple 排序行為）
+  - 混合 tree（兩配對 + 一 orphan + 一 handwritten） → 只回那一個 orphan
+  - 「`.ipynb` 沒有對應 `.py`」（missing）→ 不算 orphan（由 main loop 另外回報），明確區分職責
+- CI workflow 無需改動：`.github/workflows/ipynb-py-sync.yml` 已經跑 `python3 -m unittest discover -s tools/tests`，新 test 自動被 pick up；且 sync step 已經跑 `check_ipynb_py_sync.py`，orphan 行為自動接上
+- 本地驗證：
+  - `python3 tools/tests/test_check_ipynb_py_sync.py` → `Ran 9 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 40 tests OK`（M8 31 + M9 9）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync，0 orphan，exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK，exit 0
+
+#### 用法
+```bash
+# Orphan 偵測現在內建在 sync check 裡，不用獨立指令
+python3 tools/check_ipynb_py_sync.py             # 含 orphan 偵測
+python3 tools/check_ipynb_py_sync.py --quiet     # 只看 summary 行的 "Orphan .py: N"
+```
+
+#### 失敗時怎麼修
+```bash
+# Orphan 出現代表 .ipynb 不存在了。兩個選項：
+# 1. 確實要刪這個 notebook → 刪掉 .py
+git rm example/stale_orphan.py
+
+# 2. notebook 被誤刪 → 從歷史救回
+git checkout HEAD~1 -- example/SomeNotebook.ipynb
+python3 tools/ipynb_to_py.py --files example/SomeNotebook.ipynb
+```
+
 ## Fallback 指引
 
 若要回退：
@@ -198,6 +251,13 @@ rm -r tools/tests
 # 並把 .github/workflows/ipynb-py-sync.yml 的 "Run unit tests" step 刪掉
 ```
 
+若要關掉 orphan `.py` 偵測：
+```bash
+# 還原 tools/check_ipynb_py_sync.py 到 M8 版本
+git revert <M9-commit-sha>
+# 或手動拔掉 _orphan_py() / summary 中 "Orphan .py" 那行
+```
+
 ## 已知限制 / 後續
 
 - 沒處理 cell outputs（刻意丟掉，保持 .py 乾淨）
@@ -207,3 +267,4 @@ rm -r tools/tests
 - M6 的 workflow yaml 已 commit 進 repo，但要等到首次 `git push` 後 GitHub Actions 才會真正執行第一次（夜間 cron 不會 push）
 - CI 採嚴格 byte-for-byte 比對；若日後改 `ipynb_to_py.py` 的 HEADER / CELL_SEP / sanitize 規則，要同步把全部 `.py` 重生並 commit，否則 CI 會紅
 - `_sanitize_code` 的 trailing-newline 不對稱已 lock 進 M8 的 unit test（見 `test_trailing_newline_stripped_when_present`）。若要把它「修正」成 always-trailing-newline，必須同時 regen 全部 77 個 `.py` 並更新 test 預期
+- M9 的 orphan 偵測 hard-codes 兩組目錄常量（`_SKIP_DIR_PARTS` / `_HANDWRITTEN_DIR_PARTS`）。若日後在 `tools/` 以外另起手寫 Python 模組（例如 `scripts/` 或 `src/`），要記得加進 `_HANDWRITTEN_DIR_PARTS`，否則會被誤判為 orphan
