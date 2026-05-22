@@ -14,6 +14,7 @@
 - **M7** — `.gitattributes` 把 77 個生成 `.py` 標為 `linguist-generated=true`，讓 GitHub PR diff 收合 + 不計入語言統計
 - **M8** — Unit tests `tools/tests/test_ipynb_to_py.py`：用 stdlib `unittest` 為 `_comment_block` / `_sanitize_code` / `convert_to_str` 補 edge case 覆蓋，並在 CI workflow 加上 `python3 -m unittest discover -s tools/tests`
 - **M9** — Orphan `.py` detection：擴充 `tools/check_ipynb_py_sync.py` 加 `_orphan_py()`，掃出沒有對應 `.ipynb` 的孤兒 `.py`（notebook 被刪/改名但 `.py` 留下的狀況），補 9 個 unit test 進 `tools/tests/test_check_ipynb_py_sync.py`
+- **M10** — Unit tests for `check_converted_py.py`：補 31 個 unit test 進 `tools/tests/test_check_converted_py.py`，覆蓋 `MAGIC_RE` / `_paired_py_files` / `_compile_check` / `_magic_check` / `main()` — 完成 toolchain 三支工具（converter / sync checker / converted-py validator）的測試三聯
 
 ## 進度日誌
 
@@ -210,6 +211,33 @@ git checkout HEAD~1 -- example/SomeNotebook.ipynb
 python3 tools/ipynb_to_py.py --files example/SomeNotebook.ipynb
 ```
 
+### M10 — Unit tests for `check_converted_py.py`
+- 為什麼補：toolchain 三支工具中，`check_converted_py.py`（py_compile + magic-leak validator）是 M8（converter）與 M9（sync checker）之後唯一還沒有 unit test 的。CI 對全 77 個 notebook 做 smoke test 雖然能擋大規模回歸，但 helper 級別的行為改動沒有快速回饋；未來若改 `MAGIC_RE` 規則或 truncate 長度，沒有 unit test 容易整批失靈
+- 新增 `tools/tests/test_check_converted_py.py`（純 stdlib `unittest`，0 額外依賴），31 個 case 分五組：
+  - **`MagicRegexTests`（6 cases）** — pin `MAGIC_RE` 接受 `!` / `%` / `%%` / `?` 且拒絕 `# !` / 純程式碼 / 空字串
+  - **`PairedPyFilesTests`（7 cases）** — 空 tree、root 單檔、子目錄、`.ipynb_checkpoints` 過濾（含 nested）、`.py` 不存在仍配對、多檔 walk
+  - **`CompileCheckTests`（6 cases）** — 合法檔回 None、空檔回 None、純註解回 None、syntax error 回字串、`!ls` / `%matplotlib` 因 syntax error 被擋
+  - **`MagicCheckTests`（6 cases）** — 乾淨檔回 []、`# !ls` 不誤判、leaked bang 含 line number、`%` 與 `?` 同檔多行、`lstrip()` 後 indent magic 也被抓、長 line 截到 120 chars
+  - **`MainTests`（6 cases）** — 空 root rc=1、全 pass rc=0、missing/compile/magic 任一觸發 rc=2、`--quiet` 抑制 per-file 行
+- 整合 `_run()` helper 用 `redirect_stdout` / `redirect_stderr` 捕獲輸出，免污染 test runner
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已經跑 `python3 -m unittest discover -s tools/tests`，新 test 自動被 pick up
+- 本地驗證：
+  - `python3 tools/tests/test_check_converted_py.py -v` → `Ran 31 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 71 tests OK`（M8 31 + M9 9 + M10 31）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+
+#### 用法
+```bash
+# 跑 M10 的 31 個 test
+python3 tools/tests/test_check_converted_py.py
+python3 tools/tests/test_check_converted_py.py -v
+
+# 跑單一 test class
+python3 -m unittest tools.tests.test_check_converted_py.MagicCheckTests
+python3 -m unittest tools.tests.test_check_converted_py.MainTests
+```
+
 ## Fallback 指引
 
 若要回退：
@@ -268,3 +296,4 @@ git revert <M9-commit-sha>
 - CI 採嚴格 byte-for-byte 比對；若日後改 `ipynb_to_py.py` 的 HEADER / CELL_SEP / sanitize 規則，要同步把全部 `.py` 重生並 commit，否則 CI 會紅
 - `_sanitize_code` 的 trailing-newline 不對稱已 lock 進 M8 的 unit test（見 `test_trailing_newline_stripped_when_present`）。若要把它「修正」成 always-trailing-newline，必須同時 regen 全部 77 個 `.py` 並更新 test 預期
 - M9 的 orphan 偵測 hard-codes 兩組目錄常量（`_SKIP_DIR_PARTS` / `_HANDWRITTEN_DIR_PARTS`）。若日後在 `tools/` 以外另起手寫 Python 模組（例如 `scripts/` 或 `src/`），要記得加進 `_HANDWRITTEN_DIR_PARTS`，否則會被誤判為 orphan
+- M10 的 `MainTests` 直接依賴 `main()` 內 summary 字串格式（`'OK:                  2'` / `'Missing .py sibling: 1'`）。若改 print 對齊空白數或欄位措辭，會同時打到這幾個 test，記得一起更新
