@@ -14,7 +14,7 @@ cd "$repo_root"
 mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR -z \
     | tr '\0' '\n' \
     | grep -E '\.ipynb$' \
-    | grep -v '/\.ipynb_checkpoints/' \
+    | grep -vE '(^|/)\.ipynb_checkpoints/' \
     || true)
 
 if [ ${#staged[@]} -eq 0 ]; then

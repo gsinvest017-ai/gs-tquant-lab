@@ -15,6 +15,7 @@
 - **M8** — Unit tests `tools/tests/test_ipynb_to_py.py`：用 stdlib `unittest` 為 `_comment_block` / `_sanitize_code` / `convert_to_str` 補 edge case 覆蓋，並在 CI workflow 加上 `python3 -m unittest discover -s tools/tests`
 - **M9** — Orphan `.py` detection：擴充 `tools/check_ipynb_py_sync.py` 加 `_orphan_py()`，掃出沒有對應 `.ipynb` 的孤兒 `.py`（notebook 被刪/改名但 `.py` 留下的狀況），補 9 個 unit test 進 `tools/tests/test_check_ipynb_py_sync.py`
 - **M10** — Unit tests for `check_converted_py.py`：補 31 個 unit test 進 `tools/tests/test_check_converted_py.py`，覆蓋 `MAGIC_RE` / `_paired_py_files` / `_compile_check` / `_magic_check` / `main()` — 完成 toolchain 三支工具（converter / sync checker / converted-py validator）的測試三聯
+- **M11** — Integration tests for `tools/hooks/pre-commit` + `tools/hooks/install.sh`：補 12 個 subprocess-based test 進 `tools/tests/test_pre_commit_hook.py`，每個 test 在自有 temp git repo 跑真實 hook（含 symlink install）。順手修掉一個被測試挖出來的 root-level `.ipynb_checkpoints/` filter bug
 
 ## 進度日誌
 
@@ -238,6 +239,38 @@ python3 -m unittest tools.tests.test_check_converted_py.MagicCheckTests
 python3 -m unittest tools.tests.test_check_converted_py.MainTests
 ```
 
+### M11 — Integration tests for the pre-commit hook
+- 為什麼補：toolchain 四個元件中（converter / sync checker / converted-py validator / pre-commit hook），前三個在 M8/M9/M10 都有 unit test，只剩 bash 寫的 `tools/hooks/pre-commit` + `tools/hooks/install.sh` 完全沒測過。M5 結尾只有手動跑 `Aroon.ipynb` 的 end-to-end smoke。未來要動 hook 的 filter / `set -euo pipefail` / `--diff-filter` flags，沒有快速回饋
+- 新增 `tools/tests/test_pre_commit_hook.py`（純 stdlib `unittest` + `subprocess` + `tempfile`，0 額外依賴），12 個 case 分兩組：
+  - **`HookBehaviourTests`（9 cases）** — 每個 test 在自有 temp git repo 跑：
+    - 把 `tools/hooks/pre-commit`、`tools/hooks/install.sh`、`tools/ipynb_to_py.py` 複製進 temp repo
+    - 用 `os.symlink('../../tools/hooks/pre-commit', '.git/hooks/pre-commit')` 安裝（與 `install.sh` 同一形式）
+    - 透過 `subprocess.run(['git', 'commit', ...])` 觸發 hook，再驗證 `.py` 是否被產生 + 進 commit
+    - 涵蓋：無 ipynb staged（passthrough）/ 新增 ipynb / 修改 ipynb / 刪除 ipynb（不該觸發）/ `.ipynb_checkpoints/` 被過濾 / 多檔批次 / `git mv` rename / rename 留下 orphan `.py`（已知限制 lock 進 test）/ HEADER + cell marker end-to-end
+  - **`InstallShTests`（3 cases）** — 直接跑 `./tools/hooks/install.sh`：
+    - Fresh install → `.git/hooks/pre-commit` 是 symlink、target 為相對路徑 `../../tools/hooks/pre-commit`
+    - 重跑 idempotent → 無 backup 檔產生
+    - Pre-existing 非 symlink hook → 備份到 `pre-commit.backup.<epoch>` 後安裝 symlink
+- **測試挖到的真實 bug + 順手修掉**：原 hook filter `grep -v '/\.ipynb_checkpoints/'` 要求 `.ipynb_checkpoints/` 在子目錄裡才會被過濾；root-level（例如 Jupyter 在 repo 根目錄開 `Aroon.ipynb` 後產生的 `.ipynb_checkpoints/Aroon-checkpoint.ipynb`）會繞過 filter。改成 `grep -vE '(^|/)\.ipynb_checkpoints/'` 同時匹配兩種；`.ipynb_checkpoints/` 本來就在 `.gitignore` 內，這是 defense-in-depth 不是 hot path
+- 為什麼用 subprocess 而非 mock：hook 是 bash 腳本，內部呼叫 `git diff` / `mapfile` / `python3` 多支真實工具；mock 任何一支都會讓 test 變得「測 mock 而不是測 hook」。每個 test 用 `tempfile.TemporaryDirectory()` 起新 git repo，慢一點（12 個 test 跑 0.5s）但對 hook 的真實行為有 byte-for-byte 保證
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已經跑 `python3 -m unittest discover -s tools/tests`，新 test 自動 pick up
+- 本地驗證：
+  - `python3 tools/tests/test_pre_commit_hook.py -v` → `Ran 12 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 83 tests OK`（M8 31 + M9 9 + M10 31 + M11 12）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+
+#### 用法
+```bash
+# 跑 M11 的 12 個 hook 測試
+python3 tools/tests/test_pre_commit_hook.py
+python3 tools/tests/test_pre_commit_hook.py -v
+
+# 跑單一 test class
+python3 -m unittest tools.tests.test_pre_commit_hook.HookBehaviourTests
+python3 -m unittest tools.tests.test_pre_commit_hook.InstallShTests
+```
+
 ## Fallback 指引
 
 若要回退：
@@ -286,6 +319,12 @@ git revert <M9-commit-sha>
 # 或手動拔掉 _orphan_py() / summary 中 "Orphan .py" 那行
 ```
 
+若要拔掉 hook integration test：
+```bash
+rm tools/tests/test_pre_commit_hook.py
+# CI workflow 不需動（discover 模式自動少抓 12 個 test）
+```
+
 ## 已知限制 / 後續
 
 - 沒處理 cell outputs（刻意丟掉，保持 .py 乾淨）
@@ -297,3 +336,6 @@ git revert <M9-commit-sha>
 - `_sanitize_code` 的 trailing-newline 不對稱已 lock 進 M8 的 unit test（見 `test_trailing_newline_stripped_when_present`）。若要把它「修正」成 always-trailing-newline，必須同時 regen 全部 77 個 `.py` 並更新 test 預期
 - M9 的 orphan 偵測 hard-codes 兩組目錄常量（`_SKIP_DIR_PARTS` / `_HANDWRITTEN_DIR_PARTS`）。若日後在 `tools/` 以外另起手寫 Python 模組（例如 `scripts/` 或 `src/`），要記得加進 `_HANDWRITTEN_DIR_PARTS`，否則會被誤判為 orphan
 - M10 的 `MainTests` 直接依賴 `main()` 內 summary 字串格式（`'OK:                  2'` / `'Missing .py sibling: 1'`）。若改 print 對齊空白數或欄位措辭，會同時打到這幾個 test，記得一起更新
+- M11 的 hook test 用真實 `git commit` 驅動 subprocess，所以對 git CLI 行為有依賴（特別是 `git diff --cached --name-only --diff-filter=ACMR -z` 對 rename 的處理）。若日後升級 git 主版本（不太可能改這個 contract），rename 測試可能要重看
+- M11 已知 lock 進 test 的限制：hook 在 `git mv old.ipynb new.ipynb` 後不會刪除 `old.py`（單向同步），靠 M9 的 `_orphan_py()` 在 sync check 階段抓出來。若要把 hook 改成「rename 時連 old.py 一起 rm」，要同時更新 `test_rename_does_not_clean_up_old_py`
+- M11 修掉的小 bug：`tools/hooks/pre-commit` 的 `.ipynb_checkpoints/` filter 原本沒匹配 root-level（例如 `.ipynb_checkpoints/Aroon-checkpoint.ipynb`），已改為 `(^|/)\.ipynb_checkpoints/`。實務上這個目錄已在 `.gitignore`，所以是 defense-in-depth
