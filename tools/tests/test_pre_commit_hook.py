@@ -137,21 +137,42 @@ class HookBehaviourTests(_RepoFixture):
         self.assertNotIn('a = 1', py_text)
         self.assertIn('demo.py', self._head_files())
 
-    def test_deleted_ipynb_does_not_invoke_converter(self) -> None:
-        """Staged deletion is filtered out by --diff-filter=ACMR, so the hook does nothing."""
+    def test_deleted_ipynb_also_removes_py_sibling(self) -> None:
+        """When the user only stages the .ipynb deletion, hook should auto-remove the .py too."""
         self._bootstrap()
         nb = self.repo / 'demo.ipynb'
         nb.write_text(_mini_nb())
         self._stage('demo.ipynb')
         self._commit('add nb')
-        nb.unlink()
         py = self.repo / 'demo.py'
-        if py.exists():
-            py.unlink()
-        self._stage('demo.ipynb', 'demo.py')
+        self.assertTrue(py.exists(), 'precondition: hook should have generated demo.py')
+        nb.unlink()
+        # Stage only the .ipynb deletion; the hook must clean up demo.py.
+        self._stage('demo.ipynb')
         r = self._commit('delete nb')
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(py.exists(), 'hook must not regenerate a .py for a deleted .ipynb')
+        self.assertFalse(py.exists(), 'hook should auto-remove .py when .ipynb is deleted')
+
+    def test_deleted_ipynb_without_existing_py_is_silent(self) -> None:
+        """If the .py sibling was never tracked, deletion of the .ipynb must not error."""
+        self._bootstrap()
+        nb = self.repo / 'orphan.ipynb'
+        nb.write_text(_mini_nb())
+        # Stage + commit the ipynb without ever generating a .py: use git add
+        # --intent-to-add then commit just the ipynb after deleting any .py.
+        self._stage('orphan.ipynb')
+        self._commit('add nb')
+        py = self.repo / 'orphan.py'
+        if py.exists():
+            _run(['git', 'rm', '-q', '--', 'orphan.py'], self.repo)
+            self._commit('drop py')
+        self.assertFalse(py.exists())
+        nb.unlink()
+        self._stage('orphan.ipynb')
+        r = self._commit('delete nb')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(nb.exists())
+        self.assertFalse(py.exists())
 
     def test_ipynb_checkpoints_directory_is_filtered(self) -> None:
         """Files under .ipynb_checkpoints/ must be skipped."""
@@ -198,20 +219,18 @@ class HookBehaviourTests(_RepoFixture):
         self.assertTrue(new_py.exists())
         self.assertIn('renamed = True', new_py.read_text())
 
-    def test_rename_does_not_clean_up_old_py(self) -> None:
-        """Locks in known limitation: hook leaves an orphan .py at the old name.
-
-        check_ipynb_py_sync.py's _orphan_py() (M9) catches the orphan downstream;
-        the hook itself is a single-direction sync and isn't expected to delete.
-        """
+    def test_rename_cleans_up_old_py(self) -> None:
+        """git mv old.ipynb new.ipynb: hook regenerates new.py AND removes old.py."""
         self._bootstrap()
         (self.repo / 'old.ipynb').write_text(_mini_nb())
         self._stage('old.ipynb')
         self._commit('add old')
+        self.assertTrue((self.repo / 'old.py').exists(), 'precondition: old.py exists')
         _run(['git', 'mv', 'old.ipynb', 'new.ipynb'], self.repo)
-        self._commit('rename')
-        self.assertTrue((self.repo / 'old.py').exists())
-        self.assertTrue((self.repo / 'new.py').exists())
+        r = self._commit('rename')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.repo / 'old.py').exists(), 'old.py should be auto-removed')
+        self.assertTrue((self.repo / 'new.py').exists(), 'new.py should be auto-generated')
 
     def test_py_contains_converter_header_and_cell_marker(self) -> None:
         """End-to-end sanity: the .py uses the converter's HEADER + CELL_SEP."""

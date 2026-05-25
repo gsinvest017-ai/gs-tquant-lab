@@ -17,19 +17,36 @@ mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR -z \
     | grep -vE '(^|/)\.ipynb_checkpoints/' \
     || true)
 
-if [ ${#staged[@]} -eq 0 ]; then
+# Collect .ipynb files gone from the new index (deleted or renamed-away). The
+# --no-renames flag forces a rename to surface as D-old + A-new so we see the
+# old path here; the regenerate block above sees the new path via ACMR.
+mapfile -t removed < <(git diff --cached --no-renames --name-only --diff-filter=D -z \
+    | tr '\0' '\n' \
+    | grep -E '\.ipynb$' \
+    | grep -vE '(^|/)\.ipynb_checkpoints/' \
+    || true)
+
+if [ ${#staged[@]} -eq 0 ] && [ ${#removed[@]} -eq 0 ]; then
     exit 0
 fi
 
-echo "[ipynb->py hook] regenerating .py for ${#staged[@]} notebook(s)..."
-python3 tools/ipynb_to_py.py --files "${staged[@]}"
+if [ ${#staged[@]} -gt 0 ]; then
+    echo "[ipynb->py hook] regenerating .py for ${#staged[@]} notebook(s)..."
+    python3 tools/ipynb_to_py.py --files "${staged[@]}"
+    for nb in "${staged[@]}"; do
+        py="${nb%.ipynb}.py"
+        if [ -f "$py" ]; then
+            git add -- "$py"
+        fi
+    done
+fi
 
-# Re-stage every generated .py so the commit captures the sync.
-for nb in "${staged[@]}"; do
-    py="${nb%.ipynb}.py"
-    if [ -f "$py" ]; then
-        git add -- "$py"
-    fi
-done
+if [ ${#removed[@]} -gt 0 ]; then
+    echo "[ipynb->py hook] removing .py sibling for ${#removed[@]} deleted/renamed notebook(s)..."
+    for nb in "${removed[@]}"; do
+        py="${nb%.ipynb}.py"
+        git rm -f --ignore-unmatch --quiet -- "$py" >/dev/null
+    done
+fi
 
 echo "[ipynb->py hook] done."

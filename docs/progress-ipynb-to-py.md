@@ -16,6 +16,7 @@
 - **M9** — Orphan `.py` detection：擴充 `tools/check_ipynb_py_sync.py` 加 `_orphan_py()`，掃出沒有對應 `.ipynb` 的孤兒 `.py`（notebook 被刪/改名但 `.py` 留下的狀況），補 9 個 unit test 進 `tools/tests/test_check_ipynb_py_sync.py`
 - **M10** — Unit tests for `check_converted_py.py`：補 31 個 unit test 進 `tools/tests/test_check_converted_py.py`，覆蓋 `MAGIC_RE` / `_paired_py_files` / `_compile_check` / `_magic_check` / `main()` — 完成 toolchain 三支工具（converter / sync checker / converted-py validator）的測試三聯
 - **M11** — Integration tests for `tools/hooks/pre-commit` + `tools/hooks/install.sh`：補 12 個 subprocess-based test 進 `tools/tests/test_pre_commit_hook.py`，每個 test 在自有 temp git repo 跑真實 hook（含 symlink install）。順手修掉一個被測試挖出來的 root-level `.ipynb_checkpoints/` filter bug
+- **M12** — Pre-commit hook bidirectional sync：擴充 `tools/hooks/pre-commit` 在 `.ipynb` 被 delete / rename 時自動 `git rm` 掉對應的 `.py`，把 M11 文件裡的「known limitation: orphan after rename」直接關掉。翻轉 2 個鎖住舊行為的 hook test、補 1 個 deletion-without-existing-py silent test
 
 ## 進度日誌
 
@@ -271,6 +272,38 @@ python3 -m unittest tools.tests.test_pre_commit_hook.HookBehaviourTests
 python3 -m unittest tools.tests.test_pre_commit_hook.InstallShTests
 ```
 
+### M12 — Hook 在 delete / rename 時自動清掉孤兒 `.py`
+- 為什麼補：M11 的進度文末明確列了「`git mv old.ipynb new.ipynb` 之後 hook 不會刪 `old.py`，靠 M9 的 `_orphan_py()` 下游抓」這條已知限制。雖然 sync check 能在 CI 抓到，但需要使用者額外再跑一次 `python3 tools/check_ipynb_py_sync.py` 或等 CI 紅；hook 自己 close 這個 loop 比較對稱
+- 改 `tools/hooks/pre-commit`：
+  - 在原本 `--diff-filter=ACMR` 的 staged 清單之外，多收一份 `--no-renames --diff-filter=D` 的 removed 清單
+  - `--no-renames` 強制 git 把 rename 拆成 D-old + A-new，所以 rename target 走 ACMR 路徑（→ 重生 new.py），rename source 走 D 路徑（→ 刪掉 old.py）；deletion 也走同一條 D 路徑
+  - 對 removed 清單裡每個 `<nb>.ipynb`，跑 `git rm -f --ignore-unmatch --quiet -- "${nb%.ipynb}.py"`；`--ignore-unmatch` 讓「`.ipynb` 從未產生 `.py`」這種情境靜默不噴錯
+  - 為什麼用 `git rm` 而非 `rm -- $py && git add -u`：`git rm` 同時處理 index + working tree，且對「.py 沒被 tracked」的情況 `--ignore-unmatch` 是官方支援的旁路
+- 改 `tools/tests/test_pre_commit_hook.py`：
+  - 翻轉 `test_deleted_ipynb_does_not_invoke_converter` → 新名 `test_deleted_ipynb_also_removes_py_sibling`，驗證使用者只 stage `.ipynb` 刪除時 `.py` 也跟著消失（hook 自己處理）
+  - 翻轉 `test_rename_does_not_clean_up_old_py` → 新名 `test_rename_cleans_up_old_py`，驗證 `git mv old.ipynb new.ipynb` 後 `old.py` 不存在、`new.py` 自動生成
+  - 補新 case `test_deleted_ipynb_without_existing_py_is_silent`：先 `git rm orphan.py` 把 `.py` 拿掉再 commit `.ipynb` 刪除，確認 hook 在沒有 sibling 可刪時不噴 error code（`--ignore-unmatch` 的保險）
+- 沒動的東西：converter / sync checker / `_orphan_py()` 全部沒改。`_orphan_py()` 仍是 CI 端的雙保險，捕捉「使用者沒裝 hook 也沒清 .py」的情境
+- 為什麼這條限制這次值得處理：M11 列為「known limitation」+「locked into test」就是技術債的訊號；現在三個 toolchain 元件對 rename 的處理是非對稱的（converter 處理 staged ACMR、sync checker 報 orphan、hook 只前向），統一成 hook 雙向後行為更可預期
+- 本地驗證：
+  - `python3 tools/tests/test_pre_commit_hook.py -v` → `Ran 13 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 84 tests OK`（M8 31 + M9 9 + M10 31 + M11→M12 13）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+
+#### 用法
+- 安裝後一切照舊：`tools/hooks/install.sh` 不用重跑（symlink 內容沒變）。下次 commit 時若有 `.ipynb` 被刪 / rename，hook 會多印一行
+  ```
+  [ipynb->py hook] removing .py sibling for N deleted/renamed notebook(s)...
+  ```
+- 想看 hook 真實行為差異：在 dev branch 跑
+  ```bash
+  git mv example/SomeNotebook.ipynb example/SomeNotebook_v2.ipynb
+  git commit -m 'rename'
+  # → 應該看到 .py sibling 也被改名、不留 orphan
+  python3 tools/check_ipynb_py_sync.py --quiet  # 應顯示 0 orphan
+  ```
+
 ## Fallback 指引
 
 若要回退：
@@ -322,7 +355,14 @@ git revert <M9-commit-sha>
 若要拔掉 hook integration test：
 ```bash
 rm tools/tests/test_pre_commit_hook.py
-# CI workflow 不需動（discover 模式自動少抓 12 個 test）
+# CI workflow 不需動（discover 模式自動少抓 13 個 test）
+```
+
+若要還原 M12 的 hook 雙向同步（讓 hook 只前向、rename / delete 後 .py 變 orphan）：
+```bash
+# 拔掉 hook 裡的 removed 區塊與 git rm 迴圈
+git revert <M12-commit-sha>
+# 同步把 hook test 兩個被翻轉的 case 改回（test_deleted_ipynb_does_not_invoke_converter / test_rename_does_not_clean_up_old_py）
 ```
 
 ## 已知限制 / 後續
@@ -337,5 +377,5 @@ rm tools/tests/test_pre_commit_hook.py
 - M9 的 orphan 偵測 hard-codes 兩組目錄常量（`_SKIP_DIR_PARTS` / `_HANDWRITTEN_DIR_PARTS`）。若日後在 `tools/` 以外另起手寫 Python 模組（例如 `scripts/` 或 `src/`），要記得加進 `_HANDWRITTEN_DIR_PARTS`，否則會被誤判為 orphan
 - M10 的 `MainTests` 直接依賴 `main()` 內 summary 字串格式（`'OK:                  2'` / `'Missing .py sibling: 1'`）。若改 print 對齊空白數或欄位措辭，會同時打到這幾個 test，記得一起更新
 - M11 的 hook test 用真實 `git commit` 驅動 subprocess，所以對 git CLI 行為有依賴（特別是 `git diff --cached --name-only --diff-filter=ACMR -z` 對 rename 的處理）。若日後升級 git 主版本（不太可能改這個 contract），rename 測試可能要重看
-- M11 已知 lock 進 test 的限制：hook 在 `git mv old.ipynb new.ipynb` 後不會刪除 `old.py`（單向同步），靠 M9 的 `_orphan_py()` 在 sync check 階段抓出來。若要把 hook 改成「rename 時連 old.py 一起 rm」，要同時更新 `test_rename_does_not_clean_up_old_py`
+- ~~M11 已知 lock 進 test 的限制：hook 在 `git mv old.ipynb new.ipynb` 後不會刪除 `old.py`（單向同步）~~ — **M12 已關掉**：hook 現在同時收 ACMR（regenerate）與 `--no-renames -D`（remove），rename / delete 都會清掉 sibling `.py`。M9 的 `_orphan_py()` 仍作為 CI 端 fallback，捕捉「沒裝 hook」的情境
 - M11 修掉的小 bug：`tools/hooks/pre-commit` 的 `.ipynb_checkpoints/` filter 原本沒匹配 root-level（例如 `.ipynb_checkpoints/Aroon-checkpoint.ipynb`），已改為 `(^|/)\.ipynb_checkpoints/`。實務上這個目錄已在 `.gitignore`，所以是 defense-in-depth
