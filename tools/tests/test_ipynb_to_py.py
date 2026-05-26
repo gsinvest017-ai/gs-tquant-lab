@@ -12,10 +12,13 @@ Run:
 """
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -29,6 +32,7 @@ from ipynb_to_py import (  # noqa: E402
     _comment_block,
     _sanitize_code,
     convert_to_str,
+    main,
 )
 
 
@@ -226,6 +230,138 @@ class ConvertToStrTests(unittest.TestCase):
         a = self._convert(cells)
         b = self._convert(cells)
         self.assertEqual(a, b)
+
+
+class MainTests(unittest.TestCase):
+    """End-to-end on the CLI entry point. Stdout/stderr captured.
+
+    chdir to a temp tree per test so root-walk mode (`main()` with no args)
+    has a clean, deterministic scan target and --files relative paths
+    resolve predictably.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self._orig_cwd = Path.cwd()
+        os.chdir(self.root)
+
+    def tearDown(self) -> None:
+        os.chdir(self._orig_cwd)
+        self._tmp.cleanup()
+
+    def _run(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_empty_root_returns_one(self) -> None:
+        rc, _, stderr = self._run('.')
+        self.assertEqual(rc, 1)
+        self.assertIn('No .ipynb under', stderr)
+
+    def test_root_walk_converts_nested_notebooks(self) -> None:
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        sub = self.root / 'sub'
+        sub.mkdir()
+        _write_nb([_cell('code', 'y = 2')], sub).rename(sub / 'B.ipynb')
+
+        rc, stdout, _ = self._run('.')
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.root / 'A.py').exists())
+        self.assertTrue((sub / 'B.py').exists())
+        self.assertIn('Converted 2/2 notebooks.', stdout)
+
+    def test_root_walk_skips_ipynb_checkpoints(self) -> None:
+        ckpt = self.root / '.ipynb_checkpoints'
+        ckpt.mkdir()
+        _write_nb([_cell('code', 'x = 1')], ckpt).rename(ckpt / 'A-checkpoint.ipynb')
+        # Empty otherwise -> no notebooks should be found
+        rc, _, stderr = self._run('.')
+        self.assertEqual(rc, 1)
+        self.assertIn('No .ipynb under', stderr)
+        self.assertFalse((ckpt / 'A-checkpoint.py').exists())
+
+    def test_root_walk_skips_nested_ipynb_checkpoints(self) -> None:
+        # One real notebook plus a checkpoint copy -> only one conversion
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        nested_ckpt = self.root / 'sub' / '.ipynb_checkpoints'
+        nested_ckpt.mkdir(parents=True)
+        _write_nb([_cell('code', 'fake')], nested_ckpt).rename(nested_ckpt / 'fake-checkpoint.ipynb')
+
+        rc, stdout, _ = self._run('.')
+        self.assertEqual(rc, 0)
+        self.assertIn('Converted 1/1 notebooks.', stdout)
+        self.assertTrue((self.root / 'A.py').exists())
+        self.assertFalse((nested_ckpt / 'fake-checkpoint.py').exists())
+
+    def test_files_mode_single_notebook(self) -> None:
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        rc, stdout, _ = self._run('--files', 'A.ipynb')
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.root / 'A.py').exists())
+        self.assertIn('Converted 1/1 notebooks.', stdout)
+
+    def test_files_mode_multiple_notebooks(self) -> None:
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        _write_nb([_cell('code', 'y = 2')], self.root).rename(self.root / 'B.ipynb')
+        rc, stdout, _ = self._run('--files', 'A.ipynb', 'B.ipynb')
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.root / 'A.py').exists())
+        self.assertTrue((self.root / 'B.py').exists())
+        self.assertIn('Converted 2/2 notebooks.', stdout)
+
+    def test_files_mode_rejects_missing_path(self) -> None:
+        rc, _, stderr = self._run('--files', 'does_not_exist.ipynb')
+        self.assertEqual(rc, 1)
+        self.assertIn('ERR not an existing .ipynb', stderr)
+        self.assertFalse((self.root / 'does_not_exist.py').exists())
+
+    def test_files_mode_rejects_non_ipynb_extension(self) -> None:
+        (self.root / 'not_a_notebook.txt').write_text('hello', encoding='utf-8')
+        rc, _, stderr = self._run('--files', 'not_a_notebook.txt')
+        self.assertEqual(rc, 1)
+        self.assertIn('ERR not an existing .ipynb', stderr)
+
+    def test_files_mode_rejects_mixed_valid_and_invalid(self) -> None:
+        # Even one bad entry aborts the whole run before any conversion happens
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        rc, _, stderr = self._run('--files', 'A.ipynb', 'missing.ipynb')
+        self.assertEqual(rc, 1)
+        self.assertIn('ERR not an existing .ipynb', stderr)
+        # The valid sibling must NOT have been converted (atomic-ish guard)
+        self.assertFalse((self.root / 'A.py').exists())
+
+    def test_dry_run_does_not_write_py_files(self) -> None:
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        rc, stdout, _ = self._run('--dry-run', '.')
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.root / 'A.py').exists())
+        self.assertIn('[dry]', stdout)
+        self.assertIn('A.ipynb -> A.py', stdout)
+        self.assertIn('Converted 0/1 notebooks.', stdout)
+
+    def test_dry_run_in_files_mode_does_not_write(self) -> None:
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        rc, stdout, _ = self._run('--dry-run', '--files', 'A.ipynb')
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.root / 'A.py').exists())
+        self.assertIn('[dry]', stdout)
+
+    def test_malformed_notebook_reported_but_does_not_abort(self) -> None:
+        # Per-file exception is caught and printed as ERR; rc stays 0 because
+        # the loop continues. The next notebook should still convert.
+        (self.root / 'Bad.ipynb').write_text('{ not valid json', encoding='utf-8')
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'Good.ipynb')
+
+        rc, stdout, stderr = self._run('.')
+        self.assertEqual(rc, 0)
+        self.assertIn('ERR', stderr)
+        self.assertIn('Bad.ipynb', stderr)
+        self.assertTrue((self.root / 'Good.py').exists())
+        # 1 of 2 succeeded
+        self.assertIn('Converted 1/2 notebooks.', stdout)
 
 
 if __name__ == '__main__':

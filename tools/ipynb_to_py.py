@@ -55,12 +55,12 @@ def convert(src: Path, dst: Path) -> None:
     dst.write_text(convert_to_str(src), encoding='utf-8')
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('root', nargs='?', default='.', help='Repo root to scan (ignored if --files given)')
     ap.add_argument('--files', nargs='+', metavar='IPYNB', help='Convert only the listed notebooks instead of walking root')
     ap.add_argument('--dry-run', action='store_true')
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.files:
         notebooks = [Path(f).resolve() for f in args.files]

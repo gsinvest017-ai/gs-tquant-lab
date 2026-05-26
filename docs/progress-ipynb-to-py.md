@@ -17,6 +17,7 @@
 - **M10** — Unit tests for `check_converted_py.py`：補 31 個 unit test 進 `tools/tests/test_check_converted_py.py`，覆蓋 `MAGIC_RE` / `_paired_py_files` / `_compile_check` / `_magic_check` / `main()` — 完成 toolchain 三支工具（converter / sync checker / converted-py validator）的測試三聯
 - **M11** — Integration tests for `tools/hooks/pre-commit` + `tools/hooks/install.sh`：補 12 個 subprocess-based test 進 `tools/tests/test_pre_commit_hook.py`，每個 test 在自有 temp git repo 跑真實 hook（含 symlink install）。順手修掉一個被測試挖出來的 root-level `.ipynb_checkpoints/` filter bug
 - **M12** — Pre-commit hook bidirectional sync：擴充 `tools/hooks/pre-commit` 在 `.ipynb` 被 delete / rename 時自動 `git rm` 掉對應的 `.py`，把 M11 文件裡的「known limitation: orphan after rename」直接關掉。翻轉 2 個鎖住舊行為的 hook test、補 1 個 deletion-without-existing-py silent test
+- **M13** — Unit tests for `ipynb_to_py.main()` CLI entry point：補 12 個 test 進 `tools/tests/test_ipynb_to_py.py`，覆蓋 root-walk / `--files` / `--dry-run` / 錯誤路徑（empty tree / missing file / 非 .ipynb 副檔名 / mixed valid+invalid / malformed JSON），並小重構 `main()` 接受 `argv` 參數（對齊 M10 的 `check_converted_py.main(argv)` 與 M9 的 `check_ipynb_py_sync.main(argv)`）。完成四個 CLI 工具的 main() 級覆蓋。
 
 ## 進度日誌
 
@@ -304,6 +305,32 @@ python3 -m unittest tools.tests.test_pre_commit_hook.InstallShTests
   python3 tools/check_ipynb_py_sync.py --quiet  # 應顯示 0 orphan
   ```
 
+### M13 — Unit tests for `ipynb_to_py.main()` CLI entry point
+- 為什麼補：M8/M9/M10 都把對應工具的 `main()` 行為 lock 進 test，唯獨 M8 漏掉了 `ipynb_to_py.py` 自己的 `main()`。converter 是整條 toolchain 的源頭，CLI 行為（root-walk vs `--files` vs `--dry-run` vs 各種 error path）若回歸，下游所有檢查與 hook 都會跟著炸。這個缺口比想像中明顯，且補完後四支工具（converter / sync checker / converted-py validator / pre-commit hook）main() 級覆蓋一致。
+- 小重構 `tools/ipynb_to_py.py`：`main()` 簽名從 `main() -> int` 改成 `main(argv: list[str] | None = None) -> int`，`ap.parse_args()` → `ap.parse_args(argv)`。argparse 對 `parse_args(None)` 預設取 `sys.argv[1:]`，所以 CLI 對外行為零變化；唯一目的是讓 unit test 可以直接傳 `argv` list 而不用 monkey-patch `sys.argv`。同時跟 M9 的 `check_ipynb_py_sync.main(argv)` 與 M10 的 `check_converted_py.main(argv)` 對齊。
+- 在 `tools/tests/test_ipynb_to_py.py` 新增 `MainTests` class，12 個 case 用 `tempfile.TemporaryDirectory()` + `os.chdir()` 隔離（避免汙染 cwd），透過 `redirect_stdout` / `redirect_stderr` 捕獲輸出：
+  - **Root-walk 模式（4 cases）** — 空 root → rc=1 + stderr `No .ipynb under`；nested notebooks 都轉成功 + summary 正確；root-level `.ipynb_checkpoints/` 完全跳過；nested `.ipynb_checkpoints/` 跳過但旁邊真 notebook 仍轉
+  - **--files 模式（5 cases）** — 單檔成功；多檔成功；不存在的 path → rc=1 + ERR；非 `.ipynb` 副檔名 → rc=1 + ERR；mixed valid+invalid → rc=1 且**所有**檔案都不轉（atomic-ish guard，由 main 先驗證再 convert）
+  - **--dry-run（2 cases）** — root-walk 與 --files 都不寫檔；stdout 有 `[dry]` 標記與 `Converted 0/N notebooks.` summary
+  - **Malformed JSON（1 case）** — `Bad.ipynb` 是壞 JSON、`Good.ipynb` 正常：rc=0、stderr 報 `ERR Bad.ipynb`、`Good.py` 仍生成、stdout `Converted 1/2`。Lock 進 test 的行為：per-file `try/except` 寬鬆 — 一個壞 notebook 不會中斷整個 batch
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已經跑 `python3 -m unittest discover -s tools/tests`，12 個新 test 自動 pick up
+- 本地驗證：
+  - `python3 tools/tests/test_ipynb_to_py.py -v` → `Ran 43 tests OK`（原 31 + M13 12）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 96 tests OK`（M8 31+12 + M9 9 + M10 31 + M11→M12 13）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+
+#### 用法
+```bash
+# 只跑 M13 新增的 MainTests class
+python3 -m unittest tools.tests.test_ipynb_to_py.MainTests
+python3 -m unittest tools.tests.test_ipynb_to_py.MainTests -v
+```
+
+#### 副作用 / 注意
+- `MainTests.setUp` 會 `os.chdir(temp_root)` 並在 `tearDown` 還原；若日後改成平行 test runner（unittest 預設 sequential 不受影響），需要把 chdir 改成 `subprocess` 隔離
+- `test_malformed_notebook_reported_but_does_not_abort` 把「main() 對壞 ipynb 寬鬆」這個行為 lock 進來；若日後想改成 strict（壞檔讓整個 batch 失敗 + rc=1），要同步翻轉這個 test 並加 `--strict` flag
+
 ## Fallback 指引
 
 若要回退：
@@ -365,6 +392,13 @@ git revert <M12-commit-sha>
 # 同步把 hook test 兩個被翻轉的 case 改回（test_deleted_ipynb_does_not_invoke_converter / test_rename_does_not_clean_up_old_py）
 ```
 
+若要還原 M13 的 `main(argv)` 簽名與 MainTests：
+```bash
+# 把 ipynb_to_py.main 改回 main() -> int + ap.parse_args() 即可（CLI 對外行為原本就一樣）
+# 並從 test_ipynb_to_py.py 拔掉 MainTests class（其餘 31 個 helper test 不受影響）
+git revert <M13-commit-sha>
+```
+
 ## 已知限制 / 後續
 
 - 沒處理 cell outputs（刻意丟掉，保持 .py 乾淨）
@@ -379,3 +413,5 @@ git revert <M12-commit-sha>
 - M11 的 hook test 用真實 `git commit` 驅動 subprocess，所以對 git CLI 行為有依賴（特別是 `git diff --cached --name-only --diff-filter=ACMR -z` 對 rename 的處理）。若日後升級 git 主版本（不太可能改這個 contract），rename 測試可能要重看
 - ~~M11 已知 lock 進 test 的限制：hook 在 `git mv old.ipynb new.ipynb` 後不會刪除 `old.py`（單向同步）~~ — **M12 已關掉**：hook 現在同時收 ACMR（regenerate）與 `--no-renames -D`（remove），rename / delete 都會清掉 sibling `.py`。M9 的 `_orphan_py()` 仍作為 CI 端 fallback，捕捉「沒裝 hook」的情境
 - M11 修掉的小 bug：`tools/hooks/pre-commit` 的 `.ipynb_checkpoints/` filter 原本沒匹配 root-level（例如 `.ipynb_checkpoints/Aroon-checkpoint.ipynb`），已改為 `(^|/)\.ipynb_checkpoints/`。實務上這個目錄已在 `.gitignore`，所以是 defense-in-depth
+- M13 的 `MainTests` 用 `os.chdir(temp_root)` 隔離 cwd。若日後 CI 改用平行 test runner（如 pytest-xdist），這些 test 會互踩 — 要重寫成 subprocess 隔離或加 `setUpClass` 級鎖
+- M13 把「main() 對單一 malformed `.ipynb` 寬鬆繼續」的行為 lock 進 `test_malformed_notebook_reported_but_does_not_abort`。若日後想改成「壞檔即整批失敗 + rc=1」，要同步翻轉這個 test 並加 `--strict` flag
