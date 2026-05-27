@@ -18,6 +18,7 @@
 - **M11** — Integration tests for `tools/hooks/pre-commit` + `tools/hooks/install.sh`：補 12 個 subprocess-based test 進 `tools/tests/test_pre_commit_hook.py`，每個 test 在自有 temp git repo 跑真實 hook（含 symlink install）。順手修掉一個被測試挖出來的 root-level `.ipynb_checkpoints/` filter bug
 - **M12** — Pre-commit hook bidirectional sync：擴充 `tools/hooks/pre-commit` 在 `.ipynb` 被 delete / rename 時自動 `git rm` 掉對應的 `.py`，把 M11 文件裡的「known limitation: orphan after rename」直接關掉。翻轉 2 個鎖住舊行為的 hook test、補 1 個 deletion-without-existing-py silent test
 - **M13** — Unit tests for `ipynb_to_py.main()` CLI entry point：補 12 個 test 進 `tools/tests/test_ipynb_to_py.py`，覆蓋 root-walk / `--files` / `--dry-run` / 錯誤路徑（empty tree / missing file / 非 .ipynb 副檔名 / mixed valid+invalid / malformed JSON），並小重構 `main()` 接受 `argv` 參數（對齊 M10 的 `check_converted_py.main(argv)` 與 M9 的 `check_ipynb_py_sync.main(argv)`）。完成四個 CLI 工具的 main() 級覆蓋。
+- **M14** — Unit tests for `check_ipynb_py_sync.main()` + `_pairs` / `_diff_preview`：補 19 個 test 進 `tools/tests/test_check_ipynb_py_sync.py`。M9 只測了 `_orphan_py()`，sync checker 的 `main()`（in-sync / missing / drift / error / orphan 五條 exit path）與 `_pairs`（notebook discovery + checkpoint filter）、`_diff_preview`（drift 渲染 + truncation）一直沒有 unit 覆蓋。補完後 sync checker 與 converter（M13）、converted-py validator（M10）同樣達到 main() 級覆蓋，四支 CLI 工具的 entry point 全部上鎖。
 
 ## 進度日誌
 
@@ -331,6 +332,33 @@ python3 -m unittest tools.tests.test_ipynb_to_py.MainTests -v
 - `MainTests.setUp` 會 `os.chdir(temp_root)` 並在 `tearDown` 還原；若日後改成平行 test runner（unittest 預設 sequential 不受影響），需要把 chdir 改成 `subprocess` 隔離
 - `test_malformed_notebook_reported_but_does_not_abort` 把「main() 對壞 ipynb 寬鬆」這個行為 lock 進來；若日後想改成 strict（壞檔讓整個 batch 失敗 + rc=1），要同步翻轉這個 test 並加 `--strict` flag
 
+### M14 — Unit tests for `check_ipynb_py_sync.main()` + `_pairs` / `_diff_preview`
+- 為什麼補：四支 CLI 工具裡，converter（M13 `MainTests`）與 converted-py validator（M10 `MainTests`）都已把 `main()` 行為 lock 進 test，連 sync checker 的 `_orphan_py()` helper 也在 M9 補過；唯獨 sync checker 自己的 `main()` 從沒被 unit 測過。`test_check_ipynb_py_sync.py` 的舊 docstring 甚至直接寫明「in-sync / drift / missing paths 只靠 CI 對真實 77 對 notebook 做 end-to-end」——這正是技術債訊號：helper 級重構（改 summary 措辭、改 diff truncation 長度、改 exit code 對應）沒有快速回饋。M14 把這條補上，sync checker 達到與其餘三支工具一致的 main() 級覆蓋
+- 在 `tools/tests/test_check_ipynb_py_sync.py` 新增 3 個 test class，19 個 case（原 9 個 `OrphanPyTests` 全部保留，檔案總計 28 個 test）：
+  - **`PairsTests`（7 cases）** — 空 tree → []；root 單檔配對 `.py` suffix；nested notebook 配對；root-level `.ipynb_checkpoints/` 過濾；nested `.ipynb_checkpoints/` 過濾；`.py` 不存在仍配對（missing 由 main 另報）；多檔 `sorted()` 順序
+  - **`DiffPreviewTests`（4 cases）** — 相同輸入 → 空字串（`difflib` 無差異）；有差異時 from/to label（`(on disk)` / `(expected from .ipynb)`）都在；`+expected` / `-actual` 標記都在；超過 `max_lines` 時出現 `more diff lines truncated` 且總行數被截到 ≤ max_lines+1
+  - **`MainTests`（8 cases）** — 空 tree → rc=1 + stderr `No .ipynb files`；全 in-sync → rc=0 + `In sync: 2`；missing `.py` → rc=2 + `MISSING:`；drift → rc=2 + `DRIFT:` + diff body（含 `(on disk)`）；`--no-diff` drift → rc=2 + `DRIFT:` 但**無** diff body；orphan `.py` → rc=2 + `ORPHAN:`；malformed `.ipynb` + 既有 `.py` → 走 `convert_to_str` 例外路徑 → rc=2 + `ERROR:`；`--quiet` 抑制 per-file 行但保留 summary 計數
+- 設計細節：
+  - 新增 `_synced_pair(path)` helper — 用 `convert_to_str(nb)` 寫出 byte-for-byte 相符的 `.py`，這樣 in-sync 測試不會因 converter 規則微調而假性 drift（測試與真實轉換邏輯同源，避免硬編 expected 字串）
+  - summary 計數斷言全用 `assertRegex(stdout, r'In sync:\s+2')` 這類 **regex + `\s+`**，刻意不硬編空白數 — 與 M10 `MainTests` 硬編 `'OK:                  2'` 不同，對日後調整欄位對齊較不脆弱（見「已知限制」對照）
+  - drift 測試靠「先 `_synced_pair` 再 append 一行」製造，最小化噪音；`--no-diff` 用「`(on disk)` 不在 stdout」反向驗證 diff body 被抑制
+  - `_run(*argv)` helper 沿用 M10/M13 的 `redirect_stdout` / `redirect_stderr` + `io.StringIO()` 模式捕獲輸出，免污染 test runner；**不需** `os.chdir()`（main 接受 root 位置參數，直接傳 temp dir）所以沒有 M13 的 cwd 隔離副作用
+- 不需動 production code：`check_ipynb_py_sync.py` 完全沒改（M9 已把 `main(argv)` 簽名就緒）。純測試新增
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已跑 `python3 -m unittest discover -s tools/tests`，19 個新 test 自動 pick up
+- 本地驗證：
+  - `python3 tools/tests/test_check_ipynb_py_sync.py -v` → `Ran 28 tests OK`（原 9 + M14 19）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 115 tests OK`（M8 31+12 + M9 9+19 + M10 31 + M11→M12 13）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+
+#### 用法
+```bash
+# 只跑 M14 新增的 class
+python3 -m unittest tools.tests.test_check_ipynb_py_sync.PairsTests
+python3 -m unittest tools.tests.test_check_ipynb_py_sync.DiffPreviewTests
+python3 -m unittest tools.tests.test_check_ipynb_py_sync.MainTests -v
+```
+
 ## Fallback 指引
 
 若要回退：
@@ -399,6 +427,14 @@ git revert <M12-commit-sha>
 git revert <M13-commit-sha>
 ```
 
+若要拔掉 M14 的 sync-checker main() 測試：
+```bash
+# 只刪 M14 新增的三個 class，保留 M9 的 OrphanPyTests
+git revert <M14-commit-sha>
+# 或手動從 test_check_ipynb_py_sync.py 移除 PairsTests / DiffPreviewTests / MainTests
+# （check_ipynb_py_sync.py production code 沒改，無需動）
+```
+
 ## 已知限制 / 後續
 
 - 沒處理 cell outputs（刻意丟掉，保持 .py 乾淨）
@@ -415,3 +451,4 @@ git revert <M13-commit-sha>
 - M11 修掉的小 bug：`tools/hooks/pre-commit` 的 `.ipynb_checkpoints/` filter 原本沒匹配 root-level（例如 `.ipynb_checkpoints/Aroon-checkpoint.ipynb`），已改為 `(^|/)\.ipynb_checkpoints/`。實務上這個目錄已在 `.gitignore`，所以是 defense-in-depth
 - M13 的 `MainTests` 用 `os.chdir(temp_root)` 隔離 cwd。若日後 CI 改用平行 test runner（如 pytest-xdist），這些 test 會互踩 — 要重寫成 subprocess 隔離或加 `setUpClass` 級鎖
 - M13 把「main() 對單一 malformed `.ipynb` 寬鬆繼續」的行為 lock 進 `test_malformed_notebook_reported_but_does_not_abort`。若日後想改成「壞檔即整批失敗 + rc=1」，要同步翻轉這個 test 並加 `--strict` flag
+- M14 的 `MainTests` 刻意用 `assertRegex(..., r'In sync:\s+2')` 而非硬編空白數，所以調 summary 欄位對齊不會打到它；但仍依賴 label 文字（`In sync:` / `Missing .py sibling:` / `Conversion errors:` / `Orphan .py (no .ipynb):`）與 per-file 前綴（`MISSING:` / `DRIFT:` / `ERROR:` / `ORPHAN:`）。若改這些措辭，要一起更新。另外 `test_drift_no_diff_suppresses_diff_body` 用「`(on disk)` 字串是否出現」當作 diff body 的 proxy，若把 `_diff_preview` 的 fromfile label 改掉，這條 assertion 要跟著改
