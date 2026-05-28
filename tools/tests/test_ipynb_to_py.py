@@ -363,6 +363,61 @@ class MainTests(unittest.TestCase):
         # 1 of 2 succeeded
         self.assertIn('Converted 1/2 notebooks.', stdout)
 
+    def test_strict_mode_passes_when_all_notebooks_convert(self) -> None:
+        # --strict on clean input should behave exactly like default mode (rc=0).
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        _write_nb([_cell('code', 'y = 2')], self.root).rename(self.root / 'B.ipynb')
+
+        rc, stdout, stderr = self._run('--strict', '.')
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.root / 'A.py').exists())
+        self.assertTrue((self.root / 'B.py').exists())
+        self.assertIn('Converted 2/2 notebooks.', stdout)
+        self.assertNotIn('[strict]', stderr)
+
+    def test_strict_mode_fails_on_malformed_notebook(self) -> None:
+        # --strict flips the M13 leniency: bad notebook -> rc=1.
+        # Strict still try-all (not fail-fast): the good sibling must still
+        # be converted so CI shows every failure on first run.
+        (self.root / 'Bad.ipynb').write_text('{ not valid json', encoding='utf-8')
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'Good.ipynb')
+
+        rc, stdout, stderr = self._run('--strict', '.')
+        self.assertEqual(rc, 1)
+        self.assertIn('ERR', stderr)
+        self.assertIn('Bad.ipynb', stderr)
+        self.assertIn('[strict]', stderr)
+        # try-all: Good.py is still produced so the operator sees the full picture
+        self.assertTrue((self.root / 'Good.py').exists())
+        self.assertIn('Converted 1/2 notebooks.', stdout)
+
+    def test_strict_mode_files_mode_fails_on_malformed(self) -> None:
+        # --strict works the same way in --files mode (post-validation failure).
+        (self.root / 'Bad.ipynb').write_text('not json at all', encoding='utf-8')
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'Good.ipynb')
+
+        rc, stdout, stderr = self._run('--strict', '--files', 'Good.ipynb', 'Bad.ipynb')
+        self.assertEqual(rc, 1)
+        self.assertIn('ERR', stderr)
+        self.assertIn('Bad.ipynb', stderr)
+        self.assertIn('[strict]', stderr)
+        # try-all guarantee in --files mode too
+        self.assertTrue((self.root / 'Good.py').exists())
+
+    def test_strict_mode_dry_run_does_not_fail(self) -> None:
+        # --strict + --dry-run: nothing is converted, so nothing can fail.
+        # Locks in: strict only enforces against real conversion failures,
+        # not against the existence of a malformed notebook on disk.
+        (self.root / 'Bad.ipynb').write_text('{ not valid json', encoding='utf-8')
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'Good.ipynb')
+
+        rc, stdout, stderr = self._run('--strict', '--dry-run', '.')
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.root / 'Bad.py').exists())
+        self.assertFalse((self.root / 'Good.py').exists())
+        self.assertIn('[dry]', stdout)
+        self.assertNotIn('[strict]', stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

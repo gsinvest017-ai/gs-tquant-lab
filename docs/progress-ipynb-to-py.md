@@ -19,6 +19,7 @@
 - **M12** — Pre-commit hook bidirectional sync：擴充 `tools/hooks/pre-commit` 在 `.ipynb` 被 delete / rename 時自動 `git rm` 掉對應的 `.py`，把 M11 文件裡的「known limitation: orphan after rename」直接關掉。翻轉 2 個鎖住舊行為的 hook test、補 1 個 deletion-without-existing-py silent test
 - **M13** — Unit tests for `ipynb_to_py.main()` CLI entry point：補 12 個 test 進 `tools/tests/test_ipynb_to_py.py`，覆蓋 root-walk / `--files` / `--dry-run` / 錯誤路徑（empty tree / missing file / 非 .ipynb 副檔名 / mixed valid+invalid / malformed JSON），並小重構 `main()` 接受 `argv` 參數（對齊 M10 的 `check_converted_py.main(argv)` 與 M9 的 `check_ipynb_py_sync.main(argv)`）。完成四個 CLI 工具的 main() 級覆蓋。
 - **M14** — Unit tests for `check_ipynb_py_sync.main()` + `_pairs` / `_diff_preview`：補 19 個 test 進 `tools/tests/test_check_ipynb_py_sync.py`。M9 只測了 `_orphan_py()`，sync checker 的 `main()`（in-sync / missing / drift / error / orphan 五條 exit path）與 `_pairs`（notebook discovery + checkpoint filter）、`_diff_preview`（drift 渲染 + truncation）一直沒有 unit 覆蓋。補完後 sync checker 與 converter（M13）、converted-py validator（M10）同樣達到 main() 級覆蓋，四支 CLI 工具的 entry point 全部上鎖。
+- **M15** — `--strict` flag for `ipynb_to_py.py`：把 M13 進度文末的 follow-up（malformed notebook 寬鬆 vs strict 二選一）轉成實做。新增 `--strict` 旗標讓任一 conversion 失敗回 rc=1（仍 try-all、不 fail-fast），CI 可主動擋住損壞的 notebook；預設行為與既有測試完全不變。補 4 個 test 進 `MainTests`：clean strict、strict + malformed、strict + `--files`、strict + dry-run。
 
 ## 進度日誌
 
@@ -358,6 +359,48 @@ python3 -m unittest tools.tests.test_check_ipynb_py_sync.PairsTests
 python3 -m unittest tools.tests.test_check_ipynb_py_sync.DiffPreviewTests
 python3 -m unittest tools.tests.test_check_ipynb_py_sync.MainTests -v
 ```
+
+### M15 — `--strict` flag 對壞 notebook 硬失敗
+- 為什麼補：M13 進度日誌結尾明確標 follow-up — `test_malformed_notebook_reported_but_does_not_abort` 把「main() 對壞 ipynb 寬鬆」這個行為 lock 進來，但同時留了「日後想改成 strict（壞檔讓整個 batch 失敗 + rc=1），要同步翻轉這個 test 並加 `--strict` flag」的伏筆。CI 端目前發現壞 notebook 時不會紅；要讓 CI 自動擋下「commit 進來的 .ipynb 變成 corrupted JSON」這種真實情境，需要一個能在 main 跑完後彙整失敗的 strict 旗標
+- 修改 `tools/ipynb_to_py.py`：
+  - argparse 加 `--strict` flag（help 寫明 default 行為）
+  - main loop 增 `failures` 計數，每次 per-file exception 進 except 區塊時 +1（既有 `ERR <rel>: <msg>` 印 stderr 行為不變）
+  - 跑完最後判斷 `if args.strict and failures: ... return 1`，並印一行 `[strict] N notebook(s) failed to convert.` 到 stderr 作為摘要訊號
+  - 模組 docstring 補一段解釋預設寬鬆 vs `--strict` 的差別，讓 `python3 tools/ipynb_to_py.py --help` 與 source 讀者都看得到
+- 設計決策（try-all vs fail-fast）：strict 模式仍 try-all 所有 notebook 後才 return 1，**不**在第一個錯誤就 break。理由：CI 第一次跑就要看到所有壞檔（典型情境：merge conflict 同時破壞多個 notebook）；fail-fast 會讓使用者反覆 push 直到全部修好，比較痛
+- 鎖住預設寬鬆：原 `test_malformed_notebook_reported_but_does_not_abort` 保留不動（沒翻轉），確認沒帶 `--strict` 時行為與 M13 完全一致；hook（M5/M11/M12）也不需要改，因為它呼叫 converter 時沒有自動加 `--strict`，預設行為對 hook 是更安全的
+- 在 `tools/tests/test_ipynb_to_py.py` 的 `MainTests` 補 4 個 case：
+  - **`test_strict_mode_passes_when_all_notebooks_convert`** — `--strict` + 兩個乾淨 notebook → rc=0、兩個 .py 都生成、stderr **沒有** `[strict]` 摘要（負向斷言保證 success path 不錯誤觸發）
+  - **`test_strict_mode_fails_on_malformed_notebook`** — `--strict` + Bad.ipynb + Good.ipynb → rc=1、stderr 同時含 `ERR Bad.ipynb` 與 `[strict]` 摘要、**Good.py 仍生成**（try-all 設計被鎖進 test）、`Converted 1/2 notebooks.` 摘要也在 stdout
+  - **`test_strict_mode_files_mode_fails_on_malformed`** — `--strict --files Good.ipynb Bad.ipynb`：rc=1、Good.py 仍生成。確認 strict 在 `--files` 模式下對「pre-existing 通過 path validation、convert 時才壞」一樣 work
+  - **`test_strict_mode_dry_run_does_not_fail`** — `--strict --dry-run` + 一個壞 notebook 一個好的：rc=0、無 `.py` 寫出。明確 lock：strict 只擋住真實 conversion failure，不擋住「pre-existing 壞 notebook 的存在」（dry-run 沒嘗試 convert 所以也不算失敗）。這條對 CI 用法很重要：未來若有人想在 PR check 跑 `--strict --dry-run` 預掃壞檔，會發現要改成不帶 `--dry-run` 才能擋
+- 不需動 production code 以外的東西：sync checker / converted-py validator / pre-commit hook 全部維持原樣。`--strict` 是純粹 opt-in 旗標，預設模式仍對 hook、CI workflow 透明
+- 不需動 CI workflow：要在 CI 啟用此 strict 守門，未來把 `.github/workflows/ipynb-py-sync.yml` 裡的 `python3 tools/ipynb_to_py.py` step 加 `--strict` 即可（這次刻意不順手改 workflow，避免把 production gate 變動與 feature flag 兩件事綁在一起）
+- 本地驗證：
+  - `python3 tools/tests/test_ipynb_to_py.py -v` → `Ran 47 tests OK`（M8 31 + M13 12 + M15 4）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 119 tests OK`（M8 31+12+4 + M9 9+19 + M10 31 + M11→M12 13）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+  - CLI smoke：`/tmp/strict-smoke` 起 1 個壞 1 個好 → 預設 rc=0、加 `--strict` rc=1 + `[strict] 1 notebook(s) failed`，Good.py 兩種模式下都生成
+
+#### 用法
+```bash
+# 預設寬鬆（與 M13 行為一致）
+python3 tools/ipynb_to_py.py .
+
+# CI 想擋壞 notebook 時加 --strict
+python3 tools/ipynb_to_py.py --strict .
+
+# --files 模式也支援 strict
+python3 tools/ipynb_to_py.py --strict --files Aroon.ipynb example/foo.ipynb
+
+# 只跑 M15 新增的 strict 測試
+python3 -m unittest tools.tests.test_ipynb_to_py.MainTests.test_strict_mode_fails_on_malformed_notebook -v
+```
+
+#### 未來想擴大 strict 範圍時的 hook 點
+- CI 在 sync check **之前**先跑一輪 `python3 tools/ipynb_to_py.py --strict --dry-run .` 是無效的（dry-run 不 convert 所以不會錯）；要擋壞檔得拿掉 `--dry-run` 並對 working tree 寫入 .py，比較適合 single-purpose pre-merge check
+- 若要把 strict 對齊到 sync checker 端 fail-fast（sync checker 目前已對 malformed 回 ERROR + rc=2），可以考慮把兩個工具的 exit code 統一成 1=usage / 2=任何錯誤，而非現在 converter 用 1 / sync checker 用 2 的不對稱；不在這次處理範圍
 
 ## Fallback 指引
 

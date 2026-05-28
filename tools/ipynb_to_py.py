@@ -3,6 +3,11 @@
 Pure stdlib — no nbformat/nbconvert dependency. Strips outputs.
 Markdown / raw cells become comment blocks; code cells are emitted verbatim.
 Magics (lines starting with % or !) are commented out so the .py is importable.
+
+By default a malformed notebook is reported to stderr but the batch continues
+and rc=0 if at least the loop completed; pass --strict to flip that into a
+hard failure (rc=1) so CI catches corrupted notebooks instead of silently
+swallowing them.
 """
 from __future__ import annotations
 
@@ -60,6 +65,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('root', nargs='?', default='.', help='Repo root to scan (ignored if --files given)')
     ap.add_argument('--files', nargs='+', metavar='IPYNB', help='Convert only the listed notebooks instead of walking root')
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument(
+        '--strict',
+        action='store_true',
+        help='Return rc=1 if any notebook fails to convert (default: log and continue)',
+    )
     args = ap.parse_args(argv)
 
     if args.files:
@@ -78,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     converted = 0
+    failures = 0
     for nb in notebooks:
         py = nb.with_suffix('.py')
         try:
@@ -94,8 +105,12 @@ def main(argv: list[str] | None = None) -> int:
             converted += 1
             print(f'OK  {rel}')
         except Exception as e:  # noqa: BLE001
+            failures += 1
             print(f'ERR {rel}: {e}', file=sys.stderr)
     print(f'\nConverted {converted}/{len(notebooks)} notebooks.')
+    if args.strict and failures:
+        print(f'[strict] {failures} notebook(s) failed to convert.', file=sys.stderr)
+        return 1
     return 0
 
 
