@@ -20,6 +20,7 @@
 - **M13** — Unit tests for `ipynb_to_py.main()` CLI entry point：補 12 個 test 進 `tools/tests/test_ipynb_to_py.py`，覆蓋 root-walk / `--files` / `--dry-run` / 錯誤路徑（empty tree / missing file / 非 .ipynb 副檔名 / mixed valid+invalid / malformed JSON），並小重構 `main()` 接受 `argv` 參數（對齊 M10 的 `check_converted_py.main(argv)` 與 M9 的 `check_ipynb_py_sync.main(argv)`）。完成四個 CLI 工具的 main() 級覆蓋。
 - **M14** — Unit tests for `check_ipynb_py_sync.main()` + `_pairs` / `_diff_preview`：補 19 個 test 進 `tools/tests/test_check_ipynb_py_sync.py`。M9 只測了 `_orphan_py()`，sync checker 的 `main()`（in-sync / missing / drift / error / orphan 五條 exit path）與 `_pairs`（notebook discovery + checkpoint filter）、`_diff_preview`（drift 渲染 + truncation）一直沒有 unit 覆蓋。補完後 sync checker 與 converter（M13）、converted-py validator（M10）同樣達到 main() 級覆蓋，四支 CLI 工具的 entry point 全部上鎖。
 - **M15** — `--strict` flag for `ipynb_to_py.py`：把 M13 進度文末的 follow-up（malformed notebook 寬鬆 vs strict 二選一）轉成實做。新增 `--strict` 旗標讓任一 conversion 失敗回 rc=1（仍 try-all、不 fail-fast），CI 可主動擋住損壞的 notebook；預設行為與既有測試完全不變。補 4 個 test 進 `MainTests`：clean strict、strict + malformed、strict + `--files`、strict + dry-run。
+- **M16** — `--dry-run` 也驗證 notebook parseability + 在 CI 接上 strict pre-scan gate：把 M15 文末 `test_strict_mode_dry_run_does_not_fail` lock 進去的限制（`--strict --dry-run` 不擋壞檔，因 dry-run 在 parse 前就 `continue`）依 M11→M12 precedent 關掉。讓 dry-run 分支仍 parse（`convert_to_str`）但不寫檔，使 `--strict --dry-run` 成為零副作用、不重生 77 個 `.py` 的 CI pre-flight；翻轉 1 個 locked test、補 2 個 test（clean strict-dry-run pass、plain dry-run 仍寬鬆），並在 `.github/workflows/ipynb-py-sync.yml` 加一步 `python3 tools/ipynb_to_py.py --strict --dry-run .` 作為最便宜的 fail-fast gate（M15 承諾的 CI strict 守門，現在 dry-run 會 parse 才真的有意義）。
 
 ## 進度日誌
 
@@ -399,8 +400,36 @@ python3 -m unittest tools.tests.test_ipynb_to_py.MainTests.test_strict_mode_fail
 ```
 
 #### 未來想擴大 strict 範圍時的 hook 點
-- CI 在 sync check **之前**先跑一輪 `python3 tools/ipynb_to_py.py --strict --dry-run .` 是無效的（dry-run 不 convert 所以不會錯）；要擋壞檔得拿掉 `--dry-run` 並對 working tree 寫入 .py，比較適合 single-purpose pre-merge check
+- ~~CI 在 sync check **之前**先跑一輪 `python3 tools/ipynb_to_py.py --strict --dry-run .` 是無效的（dry-run 不 convert 所以不會錯）；要擋壞檔得拿掉 `--dry-run` 並對 working tree 寫入 .py~~ — **M16 已關掉**：dry-run 分支現在會 `convert_to_str()`（parse 但不寫檔），所以 `--strict --dry-run` 變成有效、零副作用的 pre-scan，已接進 CI workflow
 - 若要把 strict 對齊到 sync checker 端 fail-fast（sync checker 目前已對 malformed 回 ERROR + rc=2），可以考慮把兩個工具的 exit code 統一成 1=usage / 2=任何錯誤，而非現在 converter 用 1 / sync checker 用 2 的不對稱；不在這次處理範圍
+
+### M16 — `--dry-run` 驗證 parseability + CI strict pre-scan gate
+- 為什麼補：M15 在 `test_strict_mode_dry_run_does_not_fail` 與「未來想擴大 strict 範圍時的 hook 點」明確 lock 了一條限制——`--strict --dry-run` 擋不到壞檔，因為 dry-run 分支在 `convert(nb, py)` / `convert_to_str()` 之前就 `continue`，根本沒讀 notebook JSON。這正是 M11→M12 同款的「技術債訊號」（限制被 lock 進 test）。M16 依同一 precedent 關掉它：讓 dry-run 仍 parse、但不寫檔
+- 改 `tools/ipynb_to_py.py` 的 dry-run 分支：印完 `[dry] {rel} -> {rel_py}` 後多跑 `convert_to_str(nb)`（丟棄回傳值，不落地）。parse 失敗就跟 convert 失敗走同一條路：`failures += 1` + `ERR {rel}: {e}` 印 stderr。`converted` 在 dry-run 仍維持 0（summary 永遠 `Converted 0/N`）
+- 設計取捨（為什麼 dry-run 也報 ERR 而非完全靜默）：plain dry-run 現在對壞檔會印 ERR 到 stderr，但 **rc 仍 0**（沿用 M13/M15 的預設寬鬆）；只有加 `--strict` 才把 `failures` 翻成 rc=1。這樣 dry-run 同時是「列出將寫哪些 `.py`」與「驗證所有 notebook parse 得了」兩用途，且預設仍不會擋人
+- 模組 docstring 補一段解釋 dry-run 現在會 parse、`--strict --dry-run` 是最便宜的 CI 壞檔守門
+- CI：`.github/workflows/ipynb-py-sync.yml` 在「unit tests」之後、「sync check」之前插一步 `python3 tools/ipynb_to_py.py --strict --dry-run .`。這是 M15 文末承諾、但當時做不到的 CI strict gate——現在 dry-run 會 parse 才真正有意義。放在 sync/compile 前是因為它最便宜（不寫 77 個 `.py`、不做 byte-for-byte 比對），壞檔能在最便宜的層級先紅（對齊 M8 把 unit test 擺最前的理由）
+  - 與既有守門的關係：sync checker 對「malformed + 既有 `.py`」本來就回 ERROR + rc=2（M14 測過），所以這步是 belt-and-suspenders；它真正的獨立價值是 **本地開發**能用一條快指令驗證全 repo notebook parse 得了，不必重生整棵 `.py`
+- 測試（`tools/tests/test_ipynb_to_py.py` 的 `MainTests`，net +2 → 121 tests）：
+  - **翻轉** `test_strict_mode_dry_run_does_not_fail` → `test_strict_mode_dry_run_fails_on_malformed`：`--strict --dry-run` + Bad + Good → rc=1、stderr 含 `ERR Bad.ipynb` + `[strict]`、**Bad.py / Good.py 都不存在**（dry-run 零落地）、stdout `Converted 0/2`
+  - **新增** `test_strict_mode_dry_run_passes_on_clean`：`--strict --dry-run` + 兩個乾淨 notebook → rc=0、無檔案寫出、stderr **無** `[strict]`（success path 不誤觸）
+  - **新增** `test_dry_run_reports_malformed_without_strict`：plain `--dry-run` + Bad + Good → rc=0（仍寬鬆）、stderr 仍報 `ERR Bad.ipynb`、無 `[strict]`、無檔案寫出。鎖住「dry-run 報告但不強制」的對稱性
+- 沒動的東西：`convert_to_str` / `convert` / sync checker / converted-py validator / pre-commit hook 全部沒改。hook 呼叫 converter 時不帶 `--strict`/`--dry-run`，行為完全不變
+- 本地驗證：
+  - `python3 -m unittest discover -s tools/tests` → `Ran 121 tests OK`（M15 的 119 → 翻 1 補 2）
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+  - CLI smoke（temp dir，1 壞 1 好）：plain `--dry-run` rc=0、`--strict --dry-run` rc=1 + `[strict] 1 notebook(s) failed`，**兩種模式都不寫 `.py`**
+  - 真 repo `python3 tools/ipynb_to_py.py --strict --dry-run .` → rc=0（CI gate 在乾淨 repo 通過）
+
+#### 用法
+```bash
+# 本地：一條快指令驗證全 repo notebook 都 parse 得了（不寫任何 .py）
+python3 tools/ipynb_to_py.py --strict --dry-run .
+
+# 只跑 M16 新增/翻轉的 test
+python3 -m unittest tools.tests.test_ipynb_to_py.MainTests.test_strict_mode_dry_run_fails_on_malformed -v
+```
 
 ## Fallback 指引
 

@@ -30,6 +30,9 @@ jobs:
       - name: Run unit tests for converter
         run: python3 -m unittest discover -s tools/tests -v
 
+      - name: Pre-scan notebooks parse cleanly (strict, no write)
+        run: python3 tools/ipynb_to_py.py --strict --dry-run .
+
       - name: Verify .py siblings are regenerable + in sync with .ipynb
         run: python3 tools/check_ipynb_py_sync.py
 

@@ -8,6 +8,11 @@ By default a malformed notebook is reported to stderr but the batch continues
 and rc=0 if at least the loop completed; pass --strict to flip that into a
 hard failure (rc=1) so CI catches corrupted notebooks instead of silently
 swallowing them.
+
+--dry-run never writes a .py, but it still *parses* every notebook so it can
+double as a fast, side-effect-free validation pass: `--strict --dry-run` is the
+cheapest way for CI to fail on a corrupted .ipynb without regenerating the whole
+tree of .py siblings.
 """
 from __future__ import annotations
 
@@ -99,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
             rel_py = py
         if args.dry_run:
             print(f'[dry] {rel} -> {rel_py}')
+            # Parse (but don't write) so --dry-run can validate notebooks.
+            try:
+                convert_to_str(nb)
+            except Exception as e:  # noqa: BLE001
+                failures += 1
+                print(f'ERR {rel}: {e}', file=sys.stderr)
             continue
         try:
             convert(nb, py)

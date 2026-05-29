@@ -404,18 +404,50 @@ class MainTests(unittest.TestCase):
         # try-all guarantee in --files mode too
         self.assertTrue((self.root / 'Good.py').exists())
 
-    def test_strict_mode_dry_run_does_not_fail(self) -> None:
-        # --strict + --dry-run: nothing is converted, so nothing can fail.
-        # Locks in: strict only enforces against real conversion failures,
-        # not against the existence of a malformed notebook on disk.
+    def test_strict_mode_dry_run_fails_on_malformed(self) -> None:
+        # M16 flips the M15 leniency: --dry-run now *parses* every notebook
+        # (without writing), so `--strict --dry-run` is a usable CI pre-scan
+        # that fails (rc=1) on a corrupted .ipynb -- and still writes nothing.
         (self.root / 'Bad.ipynb').write_text('{ not valid json', encoding='utf-8')
         _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'Good.ipynb')
 
         rc, stdout, stderr = self._run('--strict', '--dry-run', '.')
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
+        # Dry-run guarantee: nothing on disk regardless of strict failure.
         self.assertFalse((self.root / 'Bad.py').exists())
         self.assertFalse((self.root / 'Good.py').exists())
         self.assertIn('[dry]', stdout)
+        self.assertIn('ERR', stderr)
+        self.assertIn('Bad.ipynb', stderr)
+        self.assertIn('[strict]', stderr)
+        # Nothing is ever "converted" in dry-run, even the good sibling.
+        self.assertIn('Converted 0/2 notebooks.', stdout)
+
+    def test_strict_mode_dry_run_passes_on_clean(self) -> None:
+        # The success path: --strict --dry-run on clean notebooks stays rc=0,
+        # writes nothing, and does NOT emit the [strict] summary.
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'A.ipynb')
+        _write_nb([_cell('code', 'y = 2')], self.root).rename(self.root / 'B.ipynb')
+
+        rc, stdout, stderr = self._run('--strict', '--dry-run', '.')
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.root / 'A.py').exists())
+        self.assertFalse((self.root / 'B.py').exists())
+        self.assertIn('[dry]', stdout)
+        self.assertNotIn('[strict]', stderr)
+
+    def test_dry_run_reports_malformed_without_strict(self) -> None:
+        # Plain --dry-run still parses (so it reports the bad notebook on
+        # stderr) but stays lenient: rc=0, no [strict], and nothing written.
+        (self.root / 'Bad.ipynb').write_text('{ not valid json', encoding='utf-8')
+        _write_nb([_cell('code', 'x = 1')], self.root).rename(self.root / 'Good.ipynb')
+
+        rc, stdout, stderr = self._run('--dry-run', '.')
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.root / 'Bad.py').exists())
+        self.assertFalse((self.root / 'Good.py').exists())
+        self.assertIn('ERR', stderr)
+        self.assertIn('Bad.ipynb', stderr)
         self.assertNotIn('[strict]', stderr)
 
 
