@@ -21,6 +21,7 @@
 - **M14** — Unit tests for `check_ipynb_py_sync.main()` + `_pairs` / `_diff_preview`：補 19 個 test 進 `tools/tests/test_check_ipynb_py_sync.py`。M9 只測了 `_orphan_py()`，sync checker 的 `main()`（in-sync / missing / drift / error / orphan 五條 exit path）與 `_pairs`（notebook discovery + checkpoint filter）、`_diff_preview`（drift 渲染 + truncation）一直沒有 unit 覆蓋。補完後 sync checker 與 converter（M13）、converted-py validator（M10）同樣達到 main() 級覆蓋，四支 CLI 工具的 entry point 全部上鎖。
 - **M15** — `--strict` flag for `ipynb_to_py.py`：把 M13 進度文末的 follow-up（malformed notebook 寬鬆 vs strict 二選一）轉成實做。新增 `--strict` 旗標讓任一 conversion 失敗回 rc=1（仍 try-all、不 fail-fast），CI 可主動擋住損壞的 notebook；預設行為與既有測試完全不變。補 4 個 test 進 `MainTests`：clean strict、strict + malformed、strict + `--files`、strict + dry-run。
 - **M16** — `--dry-run` 也驗證 notebook parseability + 在 CI 接上 strict pre-scan gate：把 M15 文末 `test_strict_mode_dry_run_does_not_fail` lock 進去的限制（`--strict --dry-run` 不擋壞檔，因 dry-run 在 parse 前就 `continue`）依 M11→M12 precedent 關掉。讓 dry-run 分支仍 parse（`convert_to_str`）但不寫檔，使 `--strict --dry-run` 成為零副作用、不重生 77 個 `.py` 的 CI pre-flight；翻轉 1 個 locked test、補 2 個 test（clean strict-dry-run pass、plain dry-run 仍寬鬆），並在 `.github/workflows/ipynb-py-sync.yml` 加一步 `python3 tools/ipynb_to_py.py --strict --dry-run .` 作為最便宜的 fail-fast gate（M15 承諾的 CI strict 守門，現在 dry-run 會 parse 才真的有意義）。
+- **M17** — Aggregate local runner `tools/check_all.py`：toolchain 已長到 4 支工具 + 4 道 CI 步驟，但本地開發者要嘛背 4 條指令、要嘛去讀 workflow yaml 才能在 push 前重現 CI。M17 補一個單一入口，step-for-step 對齊 `ipynb-py-sync.yml`（unit tests → strict pre-scan → sync check → converted check），讓 `python3 tools/check_all.py` 一條指令 == CI。沿用 M15 try-all 哲學（全跑不 fail-fast，一次列出所有問題）；`build_steps` / `run_steps` 拆成可測純函式 + 可注入 runner，補 18 個 test（含一個對真 repo 跑 steps 2-4 的 integration smoke）進 `tools/tests/test_check_all.py`。
 
 ## 進度日誌
 
@@ -431,6 +432,54 @@ python3 tools/ipynb_to_py.py --strict --dry-run .
 python3 -m unittest tools.tests.test_ipynb_to_py.MainTests.test_strict_mode_dry_run_fails_on_malformed -v
 ```
 
+### M17 — Aggregate local runner `tools/check_all.py`
+- 為什麼補：toolchain 到 M16 已是 4 支工具（converter / sync checker / converted-py validator / pre-commit hook）+ CI 4 道 gate（unit tests → strict pre-scan → sync → converted）。但「在 push 前本地重現 CI」這件事一直沒有單一入口：開發者要嘛逐條背 4 個指令，要嘛去讀 `.github/workflows/ipynb-py-sync.yml` 才知道 CI 到底跑了什麼。這是最後一個明顯的 UX 缺口——local 與 CI 之間沒有 single source of truth
+- 新增 `tools/check_all.py`（純 stdlib，0 額外依賴），step-for-step 對齊 workflow：
+  1. `python3 -m unittest discover -s tools/tests`
+  2. `python3 tools/ipynb_to_py.py --strict --dry-run <root>`
+  3. `python3 tools/check_ipynb_py_sync.py <root>`
+  4. `python3 tools/check_converted_py.py <root>`
+  - 每支子工具用 `sys.executable` 起 subprocess（用同一個 Python，不會跨 interpreter）
+  - 子工具的 root 走 positional 參數（unittest 步驟例外：它是 repo-global，永遠 discover `tools/tests`）
+  - `--quiet` 只 plumb 給兩支 checker（converter 沒有 `--quiet`，strict pre-scan 不加）
+  - `--skip-tests` 跳過 unittest 步驟（快速 wiring 檢查；integration smoke 也靠它避免在 test 內遞迴重跑整套）
+- 設計取捨：
+  - **try-all 不 fail-fast**：沿用 M15 strict 的理由——一次 invocation 要列出所有壞掉的 step，而不是修一個才看到下一個。rc=0 iff 全綠，否則 rc=1
+  - **不把 CI 改成呼叫 `check_all.py`**：CI 維持逐 step 展開，保留 GitHub 對每個 step 的獨立 annotation 與失敗定位；`check_all.py` 是 local 便利層、鏡像 CI，不是 CI 的實作。代價是兩邊要手動保持同步（見「已知限制」）
+  - `build_steps(root, *, quiet, skip_tests)` 與 `run_steps(steps, run=...)` 拆成可測純函式 + 可注入 runner，`main(argv, run=...)` 也吃可注入 runner，所以絕大多數 test 不用真的 spawn subprocess
+- 新增 `tools/tests/test_check_all.py`（18 cases，4 class）：
+  - **`BuildStepsTests`（8）** — 4 步順序與 label、`--skip-tests` 降為 3 步、argv[0] 是 `sys.executable`、unittest 步驟 `-s` 指向真 `tools/tests`、pre-scan 帶 `--strict --dry-run`、root 透傳給 checker、`--quiet` 只上 checker 不上 pre-scan、預設無 `--quiet`
+  - **`RunStepsTests`（3）** — 全跑回傳 labels、單步失敗仍跑完 4 步（no fail-fast lock 進 test）、step 順序保留
+  - **`MainTests`（6）** — 全過 rc=0 + `All 4 step(s) passed.`、任一失敗 rc=1 + 列出失敗 step、多重失敗計數、`--skip-tests` 走 3 步、`--quiet` plumb 進 checker、progress header `[1/4]`/`[4/4]`
+  - **`IntegrationTests`（1）** — `main(['--skip-tests', '--quiet', <repo>])` 對真 repo 跑 steps 2-4 → rc=0 + `All 3 step(s) passed.`。這是 nightly-safe 不變量：toolchain 對真實 77 個 notebook 仍全綠（刻意 `--skip-tests` 避免在 unittest 內遞迴重跑 121 個 test）
+  - 用 `_RecordingRunner`（substring→rc 的 fake）+ `redirect_stdout` 捕獲輸出，免污染 test runner
+- 不需動 production code 以外的東西：4 支既有工具、hook、workflow 全部沒改。`check_all.py` 是純新增
+- 本地驗證：
+  - `python3 tools/tests/test_check_all.py -v` → `Ran 18 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 139 tests OK`（M16 的 121 + M17 18）
+  - `python3 tools/check_all.py --quiet` → 4/4 step 全 PASS、rc=0
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+
+#### 用法
+```bash
+# push 前一條指令重現 CI
+python3 tools/check_all.py
+
+# checker 只印 summary（converter 的 [dry] 逐檔行仍會印——它沒有 --quiet）
+python3 tools/check_all.py --quiet
+
+# 跳過 unittest 步驟（純驗證 .py 同步 / 可編譯）
+python3 tools/check_all.py --skip-tests
+
+# 只跑 M17 的 test
+python3 -m unittest tools.tests.test_check_all
+```
+
+#### 已知限制 / 注意
+- `check_all.py` 的步驟清單是**手動**鏡像 `ipynb-py-sync.yml`；若日後在 workflow 加 / 改 step，要記得同步改 `build_steps()`（兩邊沒有自動連動）。`IntegrationTests` 只保證 steps 2-4 對真 repo 綠，不保證與 workflow 逐字一致
+- strict pre-scan 步驟會印 77 行 `[dry] ...`（converter 既有行為、沒有 `--quiet`）；`check_all --quiet` 壓不掉這段，只壓 checker 的 per-file 行
+
 ## Fallback 指引
 
 若要回退：
@@ -505,6 +554,13 @@ git revert <M13-commit-sha>
 git revert <M14-commit-sha>
 # 或手動從 test_check_ipynb_py_sync.py 移除 PairsTests / DiffPreviewTests / MainTests
 # （check_ipynb_py_sync.py production code 沒改，無需動）
+```
+
+若要拔掉 M17 的 aggregate runner：
+```bash
+rm tools/check_all.py tools/tests/test_check_all.py
+# 4 支既有工具與 CI workflow 都沒被 M17 改動，無需還原；
+# discover 模式自動少抓 18 個 test
 ```
 
 ## 已知限制 / 後續
