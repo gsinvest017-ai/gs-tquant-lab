@@ -22,6 +22,7 @@
 - **M15** — `--strict` flag for `ipynb_to_py.py`：把 M13 進度文末的 follow-up（malformed notebook 寬鬆 vs strict 二選一）轉成實做。新增 `--strict` 旗標讓任一 conversion 失敗回 rc=1（仍 try-all、不 fail-fast），CI 可主動擋住損壞的 notebook；預設行為與既有測試完全不變。補 4 個 test 進 `MainTests`：clean strict、strict + malformed、strict + `--files`、strict + dry-run。
 - **M16** — `--dry-run` 也驗證 notebook parseability + 在 CI 接上 strict pre-scan gate：把 M15 文末 `test_strict_mode_dry_run_does_not_fail` lock 進去的限制（`--strict --dry-run` 不擋壞檔，因 dry-run 在 parse 前就 `continue`）依 M11→M12 precedent 關掉。讓 dry-run 分支仍 parse（`convert_to_str`）但不寫檔，使 `--strict --dry-run` 成為零副作用、不重生 77 個 `.py` 的 CI pre-flight；翻轉 1 個 locked test、補 2 個 test（clean strict-dry-run pass、plain dry-run 仍寬鬆），並在 `.github/workflows/ipynb-py-sync.yml` 加一步 `python3 tools/ipynb_to_py.py --strict --dry-run .` 作為最便宜的 fail-fast gate（M15 承諾的 CI strict 守門，現在 dry-run 會 parse 才真的有意義）。
 - **M17** — Aggregate local runner `tools/check_all.py`：toolchain 已長到 4 支工具 + 4 道 CI 步驟，但本地開發者要嘛背 4 條指令、要嘛去讀 workflow yaml 才能在 push 前重現 CI。M17 補一個單一入口，step-for-step 對齊 `ipynb-py-sync.yml`（unit tests → strict pre-scan → sync check → converted check），讓 `python3 tools/check_all.py` 一條指令 == CI。沿用 M15 try-all 哲學（全跑不 fail-fast，一次列出所有問題）；`build_steps` / `run_steps` 拆成可測純函式 + 可注入 runner，補 18 個 test（含一個對真 repo 跑 steps 2-4 的 integration smoke）進 `tools/tests/test_check_all.py`。
+- **M18** — CI parity drift guard：M17 把 `check_all.py` 寫成「step-for-step 對齊 `ipynb-py-sync.yml`」，但沒有任何東西強制兩者保持同步——改了 workflow yaml（加/刪/重排 step、拿掉 `--strict`）卻忘了改 `check_all.py`，「local == CI」承諾就會 silently 腐爛。M18 補 `WorkflowParityTests`（6 個 test 進 `tools/tests/test_check_all.py`），純 stdlib 解析 workflow yaml 的 `run:` 指令、normalize 成 `(tool, long_flags)` signature，與 `build_steps('.')` 做 ordered 比對。沿用 M9（orphan）/ M14（sync main paths）precedent：把「只靠慣例成立」的不變量變成「靠 test 成立」。不動 production code。
 
 ## 進度日誌
 
@@ -580,3 +581,32 @@ rm tools/check_all.py tools/tests/test_check_all.py
 - M13 的 `MainTests` 用 `os.chdir(temp_root)` 隔離 cwd。若日後 CI 改用平行 test runner（如 pytest-xdist），這些 test 會互踩 — 要重寫成 subprocess 隔離或加 `setUpClass` 級鎖
 - M13 把「main() 對單一 malformed `.ipynb` 寬鬆繼續」的行為 lock 進 `test_malformed_notebook_reported_but_does_not_abort`。若日後想改成「壞檔即整批失敗 + rc=1」，要同步翻轉這個 test 並加 `--strict` flag
 - M14 的 `MainTests` 刻意用 `assertRegex(..., r'In sync:\s+2')` 而非硬編空白數，所以調 summary 欄位對齊不會打到它；但仍依賴 label 文字（`In sync:` / `Missing .py sibling:` / `Conversion errors:` / `Orphan .py (no .ipynb):`）與 per-file 前綴（`MISSING:` / `DRIFT:` / `ERROR:` / `ORPHAN:`）。若改這些措辭，要一起更新。另外 `test_drift_no_diff_suppresses_diff_body` 用「`(on disk)` 字串是否出現」當作 diff body 的 proxy，若把 `_diff_preview` 的 fromfile label 改掉，這條 assertion 要跟著改
+
+### M18 — CI parity drift guard for `check_all.py`
+- 為什麼補：M17 的核心承諾是「`python3 tools/check_all.py` 一條指令 == CI」，做法是讓 `build_steps()` step-for-step 對齊 `.github/workflows/ipynb-py-sync.yml`。但這個對齊**只靠人記得**：任何人改 workflow yaml（加/刪/重排一個 step、把 `--strict` 拿掉、換掉某支 checker）卻忘了同步改 `check_all.py`，兩邊就 silently drift，「local == CI」保證失效卻沒人會發現——綠的本地 run 不再預測綠的 CI run。這正是 M9（orphan 偵測）/ M14（sync checker main paths）一再處理的「只靠慣例成立的不變量 → 用 test 鎖死」模式，M17 留下的最後一個未上鎖缺口。
+- 解法：在 `tools/tests/test_check_all.py` 新增 `WorkflowParityTests`（6 cases）+ 兩個 module-level helper，**純 stdlib**（系統 Python 受 PEP 668 鎖，無 PyYAML）：
+  - `_workflow_run_commands()` — line-scan workflow yaml，regex `^\s*run:\s*(\S.*?)\s*$` 抓出 ordered 的單行 `run:` 指令清單。刻意不做完整 YAML parse；改用 `test_no_multiline_run_blocks` 斷言沒有 `run: |` / `run: >` 多行 block，一旦有人改成多行就 fail loudly 要求更新 parser，而非 silently 讀成空指令
+  - `_step_signature(tokens)` — 把一條指令的 token list 化約成 `(tool, frozenset(long_flags))` 契約：`tool` 是 `'unittest'` 或被呼叫的 `.py` basename；`long_flags` 是會改變行為的 `--` 旗標。**刻意 normalize 掉**：interpreter 名、script 的 path prefix（`tools/foo.py` vs 絕對路徑）、結尾 root arg（`.` / temp dir）、single-dash 旗標與其值（`-s tools/tests`）、display-only `-v`。剩下的就是 CI 與 check_all 必須一致的最小契約
+  - 6 個 case：`test_workflow_file_exists`、`test_no_multiline_run_blocks`（守 parser 假設）、`test_run_step_count_matches_build_steps`（4 == 4）、`test_step_signatures_match_in_order`（**核心 drift guard**：ordered 比對 workflow sigs vs `build_steps('.')` sigs，失敗訊息直接叫人「兩邊一起改」）、`test_tools_invoked_in_expected_order`（unittest → ipynb_to_py → sync → converted）、`test_strict_dry_run_gate_present_in_both`（M16 的 strict pre-scan gate 兩邊都在且一致）
+- 為什麼 yaml 解析放 test 而非 production：M9/M14 是把 helper 加進 production 再測；但「讓 check_all.py runtime 讀自己的 CI yaml」會引入不必要的耦合（production 工具不該依賴 CI 設定檔存在）。drift guard 本質是 test-only concern，放 test 最乾淨
+- normalize 的取捨：signature 容忍 `-v`（CI 要 verbose log）、root arg（CI checker 省略走 cwd 預設、check_all 明確傳 `.`）、abs vs rel path、`--quiet`（check_all-only 便利旗標）。這對「cosmetic 差異」不脆弱，但會抓到「meaningful 契約漂移」：step 加/刪/重排、`--strict`/`--dry-run` 掉一個、checker 被換掉
+- 不動 production code：`check_all.py`、converter、兩支 checker、hook 全部沒改。純測試新增
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已跑 `python3 -m unittest discover -s tools/tests`，6 個新 test 自動 pick up——而且這 6 個 test 守的正是這支 workflow 自己
+- 負向驗證（確認 guard 真的會咬）：暫時把 workflow 的 `--strict --dry-run .` 改成 `--dry-run .` → `test_step_signatures_match_in_order` FAIL 並印出修復指引；`git checkout` 還原後 → OK
+- 本地驗證：
+  - `python3 -m unittest tools.tests.test_check_all.WorkflowParityTests -v` → `Ran 6 tests OK`
+  - `python3 tools/tests/test_check_all.py` → `Ran 24 tests OK`（M17 18 + M18 6）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 145 tests OK`（M8 31+12+4 + M9 9+19 + M10 31 + M11→M12 13 + M17 18+6）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M18 新增的 parity class
+python3 -m unittest tools.tests.test_check_all.WorkflowParityTests
+python3 -m unittest tools.tests.test_check_all.WorkflowParityTests -v
+```
+
+#### 副作用 / 注意
+- `_workflow_run_commands()` 假設每個 `run:` 是單行 scalar。若日後 workflow 改用 `run: |` 多行 block，`test_no_multiline_run_blocks` 會先紅，提醒改寫 parser（不會 silently 漏判）
+- signature normalize 掉 `-v` 與 root arg 等 cosmetic 差異。若未來想讓 CI 與 check_all 在這些面向也嚴格一致（例如強制 root arg 一致），要放寬 `_step_signature` 的容忍範圍並同步調整兩邊
+- 這條 guard 只比對 `ipynb-py-sync.yml` 與 `check_all.py`；若日後新增第二支 workflow 或第二個 aggregate runner，要另外擴充
