@@ -30,6 +30,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from check_ipynb_py_sync import (  # noqa: E402
+    _HANDWRITTEN_DIR_PARTS,
     _diff_preview,
     _orphan_py,
     _pairs,
@@ -266,6 +267,100 @@ class MainTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertNotIn('MISSING:', stdout)
         self.assertRegex(stdout, r'Missing \.py sibling:\s+1')
+
+
+# --- .gitattributes parity (drift guard) -------------------------------------
+# The orphan detector exempts hand-written tooling via _HANDWRITTEN_DIR_PARTS
+# (('tools',)); .gitattributes independently exempts the same tree from being
+# treated as generated via `tools/**/*.py linguist-generated=false`. Both encode
+# "what counts as hand-written Python", but nothing enforced that they agree:
+# add `scripts/**/*.py linguist-generated=false` and forget _HANDWRITTEN_DIR_PARTS
+# (or vice versa) and you get either a hand-written file falsely flagged as an
+# orphan .py, or a file GitHub keeps diffing despite the intent. Same precedent
+# as M18 (check_all vs CI workflow): a convention-only invariant becomes
+# test-enforced. Pure stdlib (no PyYAML / gitattributes parser dependency).
+
+GITATTRIBUTES = TOOLS.parent / '.gitattributes'
+
+# Shape the parser understands for a hand-written override:
+#   <dir>/**/*.py linguist-generated=false
+_HANDWRITTEN_OVERRIDE_RE = re.compile(r'^(?P<dir>[^/\s*?\[\]]+)/\*\*/\*\.py$')
+
+
+def _gitattributes_lines() -> list[tuple[str, set[str]]]:
+    """Parse .gitattributes into (pattern, {attrs}) for non-comment lines."""
+    out: list[tuple[str, set[str]]] = []
+    for raw in GITATTRIBUTES.read_text(encoding='utf-8').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split()
+        out.append((parts[0], set(parts[1:])))
+    return out
+
+
+def _gitattributes_handwritten_dirs() -> frozenset[str]:
+    """Leading dir name of every `linguist-generated=false` override.
+
+    e.g. ``tools/**/*.py linguist-generated=false`` -> ``{'tools'}``. These are
+    the dirs .gitattributes declares hand-written (diffs visible, counted in
+    language stats); they must match the sync checker's _HANDWRITTEN_DIR_PARTS
+    so the two notions of "hand-written Python" never drift.
+    """
+    dirs: set[str] = set()
+    for pattern, attrs in _gitattributes_lines():
+        if 'linguist-generated=false' in attrs:
+            m = _HANDWRITTEN_OVERRIDE_RE.match(pattern)
+            if m:
+                dirs.add(m.group('dir'))
+    return frozenset(dirs)
+
+
+class GitattributesParityTests(unittest.TestCase):
+    def test_gitattributes_exists(self) -> None:
+        self.assertTrue(GITATTRIBUTES.is_file(), f'missing {GITATTRIBUTES}')
+
+    def test_default_marks_py_as_generated(self) -> None:
+        # The override only means anything if the base rule defaults .py to
+        # generated; pin that the base rule is present and exact.
+        self.assertIn(('*.py', {'linguist-generated=true'}), _gitattributes_lines())
+
+    def test_at_least_one_handwritten_override(self) -> None:
+        self.assertTrue(
+            _gitattributes_handwritten_dirs(),
+            'expected at least one `<dir>/**/*.py linguist-generated=false` override',
+        )
+
+    def test_override_patterns_have_expected_shape(self) -> None:
+        # Guards the _HANDWRITTEN_OVERRIDE_RE assumption: every
+        # linguist-generated=false pattern must be `<dir>/**/*.py` so the
+        # leading-dir extraction is valid. A new shape fails loudly here rather
+        # than silently dropping the dir from the parity comparison below.
+        for pattern, attrs in _gitattributes_lines():
+            if 'linguist-generated=false' in attrs:
+                self.assertRegex(
+                    pattern, _HANDWRITTEN_OVERRIDE_RE,
+                    f'unparseable hand-written override {pattern!r}; update '
+                    '_HANDWRITTEN_OVERRIDE_RE + this test together',
+                )
+
+    def test_handwritten_dirs_match_sync_checker(self) -> None:
+        # Core drift guard.
+        self.assertEqual(
+            _gitattributes_handwritten_dirs(),
+            frozenset(_HANDWRITTEN_DIR_PARTS),
+            '.gitattributes linguist-generated=false dirs drifted from '
+            'check_ipynb_py_sync._HANDWRITTEN_DIR_PARTS.\n'
+            f'  .gitattributes: {sorted(_gitattributes_handwritten_dirs())}\n'
+            f'  sync checker:   {sorted(_HANDWRITTEN_DIR_PARTS)}\n'
+            'Update .gitattributes and tools/check_ipynb_py_sync.py together so '
+            'the two notions of "hand-written Python" stay aligned.',
+        )
+
+    def test_tools_handwritten_on_both_sides(self) -> None:
+        # Positive anchor for the current state.
+        self.assertIn('tools', _gitattributes_handwritten_dirs())
+        self.assertIn('tools', _HANDWRITTEN_DIR_PARTS)
 
 
 if __name__ == '__main__':

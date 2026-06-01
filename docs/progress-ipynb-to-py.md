@@ -610,3 +610,34 @@ python3 -m unittest tools.tests.test_check_all.WorkflowParityTests -v
 - `_workflow_run_commands()` 假設每個 `run:` 是單行 scalar。若日後 workflow 改用 `run: |` 多行 block，`test_no_multiline_run_blocks` 會先紅，提醒改寫 parser（不會 silently 漏判）
 - signature normalize 掉 `-v` 與 root arg 等 cosmetic 差異。若未來想讓 CI 與 check_all 在這些面向也嚴格一致（例如強制 root arg 一致），要放寬 `_step_signature` 的容忍範圍並同步調整兩邊
 - 這條 guard 只比對 `ipynb-py-sync.yml` 與 `check_all.py`；若日後新增第二支 workflow 或第二個 aggregate runner，要另外擴充
+
+### M19 — `.gitattributes` ↔ sync-checker hand-written-dir parity guard
+- 為什麼補：M18 把「`check_all.py` step-for-step 對齊 CI workflow」這個只靠慣例成立的不變量鎖進 test，但 toolchain 裡還剩**最後一條**同類缺口——「什麼算 hand-written Python」這個概念同時被寫死在兩個檔，卻沒有東西強制兩邊一致：
+  - `.gitattributes`：`*.py linguist-generated=true` + `tools/**/*.py linguist-generated=false`（M7）——宣告 `tools/` 之下是手寫、其餘 `.py` 是生成
+  - `tools/check_ipynb_py_sync.py`：`_HANDWRITTEN_DIR_PARTS = ('tools',)`（M9）——orphan 偵測把 `tools/` 視為手寫、豁免
+  - 兩邊都在編碼同一個「手寫目錄集合」。一旦有人日後在 `tools/` 以外另起手寫 Python（例如 `scripts/` / `src/`），只改其中一邊：只加 `.gitattributes` override 卻忘了 `_HANDWRITTEN_DIR_PARTS` → 那個手寫 `.py` 會被 orphan 偵測誤判成孤兒（CI 紅）；反過來只加常量卻忘了 `.gitattributes` → GitHub 仍把它當生成檔收合 diff / 不計語言統計。這正是 M9 進度文「已知限制」早就標註的伏筆（「要記得加進 `_HANDWRITTEN_DIR_PARTS`，否則會被誤判為 orphan」），M19 把它從「靠記得」升級成「靠 test」。
+- 解法：在 `tools/tests/test_check_ipynb_py_sync.py` 新增 `GitattributesParityTests`（6 cases）+ 兩個 module-level helper，**純 stdlib**（不依賴 PyYAML / 任何 gitattributes parser）：
+  - `_gitattributes_lines()` — line-scan `.gitattributes`，跳過空行與 `#` 註解，把每行 split 成 `(pattern, {attrs})`
+  - `_gitattributes_handwritten_dirs()` — 對每條帶 `linguist-generated=false` 的 pattern，用 `_HANDWRITTEN_OVERRIDE_RE`（`^(?P<dir>[^/\s*?\[\]]+)/\*\*/\*\.py$`）抽出前導目錄名（`tools/**/*.py` → `tools`），回傳 `frozenset`
+  - 6 個 case：`test_gitattributes_exists`、`test_default_marks_py_as_generated`（pin base rule `*.py linguist-generated=true` 存在且精確——override 只有在 default 是 generated 時才有意義）、`test_at_least_one_handwritten_override`、`test_override_patterns_have_expected_shape`（**守 parser 假設**：每條 `=false` pattern 都必須是 `<dir>/**/*.py`，否則 loudly fail 要求一起更新 regex——同 M18 `test_no_multiline_run_blocks` 的 precedent）、`test_handwritten_dirs_match_sync_checker`（**核心 drift guard**：parsed dirs == `frozenset(_HANDWRITTEN_DIR_PARTS)`，失敗訊息直接列兩邊差異並叫人「一起改」）、`test_tools_handwritten_on_both_sides`（current state 的正向 anchor）
+- 為什麼 parser 放 test 而非 production：與 M18 同理——讓 production 工具 runtime 去讀 `.gitattributes` 會引入不必要耦合（orphan 偵測不該依賴 GitHub Linguist 設定檔存在）。這是 test-only 的 cross-file 不變量，放 test 最乾淨
+- 把 import 從 `check_ipynb_py_sync` 多拉一個 `_HANDWRITTEN_DIR_PARTS`（其餘 `_diff_preview` / `_orphan_py` / `_pairs` / `main` 不變）；**不動任何 production code**（converter / 兩支 checker / aggregate runner / hook / `.gitattributes` 全部沒改）。純測試新增，沿用 M14 / M18 的「production code 一行不動」模式
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已跑 `python3 -m unittest discover -s tools/tests`，6 個新 test 自動 pick up
+- 負向驗證（確認 guard 真的會咬）：暫時 append `scripts/**/*.py linguist-generated=false` 進 `.gitattributes` → `test_handwritten_dirs_match_sync_checker` FAIL 並印出 `.gitattributes: ['scripts', 'tools']` vs `sync checker: ['tools']` + 修復指引；`git checkout -- .gitattributes` 還原後 → OK
+- 本地驗證：
+  - `python3 -m unittest tools.tests.test_check_ipynb_py_sync.GitattributesParityTests -v` → `Ran 6 tests OK`
+  - `python3 tools/tests/test_check_ipynb_py_sync.py` → `Ran 34 tests OK`（M9 9 + M14 19 + M19 6）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 151 tests OK`（M8 31+12+4 + M9 9+19+6 + M10 31 + M11→M12 13 + M17 18+6）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M19 新增的 parity class
+python3 -m unittest tools.tests.test_check_ipynb_py_sync.GitattributesParityTests
+python3 -m unittest tools.tests.test_check_ipynb_py_sync.GitattributesParityTests -v
+```
+
+#### 副作用 / 注意
+- `_HANDWRITTEN_OVERRIDE_RE` 只認 `<dir>/**/*.py` 這種單層前導目錄的 override。若日後想用更深的 pattern（例如 `tools/sub/**/*.py`）或非 `.py` override，`test_override_patterns_have_expected_shape` 會先紅，提醒同步擴充 regex + 比對邏輯（不會 silently 漏掉那條 dir）
+- 這條 guard 只比對 `.gitattributes` 的 `linguist-generated=false` dirs 與 `_HANDWRITTEN_DIR_PARTS`；它**不**檢查 `_SKIP_DIR_PARTS`（`.git` / `.github` / `.venv` 等），因為那些是 walk-time 全域跳過、與 GitHub Linguist 無對應關係，不構成 cross-file 不變量
+- 至此 toolchain 三條「靠慣例成立 → 用 test 鎖死」的 cross-file/cross-convention 不變量全部上鎖：M9（orphan 偵測本身）、M18（check_all == CI workflow）、M19（`.gitattributes` == `_HANDWRITTEN_DIR_PARTS`）
