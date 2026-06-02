@@ -23,6 +23,8 @@
 - **M16** — `--dry-run` 也驗證 notebook parseability + 在 CI 接上 strict pre-scan gate：把 M15 文末 `test_strict_mode_dry_run_does_not_fail` lock 進去的限制（`--strict --dry-run` 不擋壞檔，因 dry-run 在 parse 前就 `continue`）依 M11→M12 precedent 關掉。讓 dry-run 分支仍 parse（`convert_to_str`）但不寫檔，使 `--strict --dry-run` 成為零副作用、不重生 77 個 `.py` 的 CI pre-flight；翻轉 1 個 locked test、補 2 個 test（clean strict-dry-run pass、plain dry-run 仍寬鬆），並在 `.github/workflows/ipynb-py-sync.yml` 加一步 `python3 tools/ipynb_to_py.py --strict --dry-run .` 作為最便宜的 fail-fast gate（M15 承諾的 CI strict 守門，現在 dry-run 會 parse 才真的有意義）。
 - **M17** — Aggregate local runner `tools/check_all.py`：toolchain 已長到 4 支工具 + 4 道 CI 步驟，但本地開發者要嘛背 4 條指令、要嘛去讀 workflow yaml 才能在 push 前重現 CI。M17 補一個單一入口，step-for-step 對齊 `ipynb-py-sync.yml`（unit tests → strict pre-scan → sync check → converted check），讓 `python3 tools/check_all.py` 一條指令 == CI。沿用 M15 try-all 哲學（全跑不 fail-fast，一次列出所有問題）；`build_steps` / `run_steps` 拆成可測純函式 + 可注入 runner，補 18 個 test（含一個對真 repo 跑 steps 2-4 的 integration smoke）進 `tools/tests/test_check_all.py`。
 - **M18** — CI parity drift guard：M17 把 `check_all.py` 寫成「step-for-step 對齊 `ipynb-py-sync.yml`」，但沒有任何東西強制兩者保持同步——改了 workflow yaml（加/刪/重排 step、拿掉 `--strict`）卻忘了改 `check_all.py`，「local == CI」承諾就會 silently 腐爛。M18 補 `WorkflowParityTests`（6 個 test 進 `tools/tests/test_check_all.py`），純 stdlib 解析 workflow yaml 的 `run:` 指令、normalize 成 `(tool, long_flags)` signature，與 `build_steps('.')` 做 ordered 比對。沿用 M9（orphan）/ M14（sync main paths）precedent：把「只靠慣例成立」的不變量變成「靠 test 成立」。不動 production code。
+- **M19** — `.gitattributes` ↔ sync-checker hand-written-dir parity guard：把「什麼算 hand-written Python」這個同時寫在 `.gitattributes`（`tools/**/*.py linguist-generated=false`）與 `check_ipynb_py_sync._HANDWRITTEN_DIR_PARTS` 的概念用 `GitattributesParityTests`（6 個 test）鎖死，兩邊不一致就 fail。
+- **M20** — `tools/README.md` toolchain 參考文件 + README↔tools/ parity guard：toolchain 已長到 4 支 Python 工具 + 2 支 hook script + CI + 157 test，但知識只散在 chronological 的 `docs/progress-ipynb-to-py.md`，沒有一份可當 reference 的入口文件。M20 補 `tools/README.md`（工具一覽表、常用指令、hook 安裝、CI 對應、測試清單、失敗修法），並依 M18 / M19 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeParityTests`（6 個 test，純 stdlib），把 README「## Tools」表格列出的工具集合鎖死 == 實際 `tools/*.py` + 2 支 hook script，文件再也不能 silently 與實際工具樹漂移。不動 production code。
 
 ## 進度日誌
 
@@ -641,3 +643,42 @@ python3 -m unittest tools.tests.test_check_ipynb_py_sync.GitattributesParityTest
 - `_HANDWRITTEN_OVERRIDE_RE` 只認 `<dir>/**/*.py` 這種單層前導目錄的 override。若日後想用更深的 pattern（例如 `tools/sub/**/*.py`）或非 `.py` override，`test_override_patterns_have_expected_shape` 會先紅，提醒同步擴充 regex + 比對邏輯（不會 silently 漏掉那條 dir）
 - 這條 guard 只比對 `.gitattributes` 的 `linguist-generated=false` dirs 與 `_HANDWRITTEN_DIR_PARTS`；它**不**檢查 `_SKIP_DIR_PARTS`（`.git` / `.github` / `.venv` 等），因為那些是 walk-time 全域跳過、與 GitHub Linguist 無對應關係，不構成 cross-file 不變量
 - 至此 toolchain 三條「靠慣例成立 → 用 test 鎖死」的 cross-file/cross-convention 不變量全部上鎖：M9（orphan 偵測本身）、M18（check_all == CI workflow）、M19（`.gitattributes` == `_HANDWRITTEN_DIR_PARTS`）
+
+### M20 — `tools/README.md` toolchain 參考文件 + README↔tools/ parity guard
+- 為什麼補：toolchain 從 M1 一路長到現在已是 4 支 Python 工具（converter / sync checker / converted-py validator / aggregate runner）+ 2 支 hook script（`pre-commit` / `install.sh`）+ 1 道 CI workflow + 157 個 test。但所有知識只活在 `docs/progress-ipynb-to-py.md`——一份**按 milestone 順序堆疊的 chronological log**，要查「某支工具怎麼用 / 失敗了怎麼修 / hook 怎麼裝」得從頭翻 600+ 行。`tools/` 底下**完全沒有 README**。任何新接手的人（或未來的自己）沒有單一 reference 入口。這是 toolchain 成熟度的最後一塊明顯缺口
+- 解法（兩部分）：
+  - **`tools/README.md`** — 純 reference（非 chronological）：
+    - 「## Tools」表格：6 個工具（4 py + 2 hook）逐個一句話角色說明
+    - 常用指令（轉檔 / `--files` / `--strict` / `--strict --dry-run` / 三支 checker / `check_all.py`）
+    - pre-commit hook 安裝（`install.sh` + 手動 symlink fallback）
+    - CI 對應：列出 `ipynb-py-sync.yml` 四步、點明與 `check_all.py` step-for-step 對齊（由 M18 `WorkflowParityTests` 鎖死）
+    - 測試清單表（6 個 test 檔各自覆蓋對象）
+    - 「失敗時怎麼修」對照表（DRIFT / MISSING / ORPHAN / compile failure / `[strict]`）
+    - 開頭明確指向 `docs/progress-ipynb-to-py.md` 作為歷史決策來源，分工清楚（README = reference，progress = log）
+  - **`tools/tests/test_readme.py` 的 `ReadmeParityTests`（6 cases，純 stdlib）** — 依 M18 / M19 precedent 把「README 文件 ↔ 實際工具樹」這個只靠慣例成立的不變量鎖進 test：
+    - `_tools_section()` — line-scan README，抓「## Tools」到下一個 `## ` header 之間的區塊
+    - `_documented_tool_paths()` — 用 `_TOOL_ROW_RE`（`^\|\s*` + backtick-wrapped `tools/...` 路徑）抓表格第一欄的工具路徑
+    - 6 個 case：`test_readme_exists`、`test_tools_table_shape`（**守 parser 假設**：Tools 區塊必須有 markdown table separator row + 至少一條 `tools/...` 資料列，被 reformat 就 loudly fail——同 M18 `test_no_multiline_run_blocks` / M19 `test_override_patterns_have_expected_shape` 的 precedent）、`test_all_toplevel_py_tools_documented`（**核心 drift guard**：documented `tools/*.py` 集合 == 實際 `glob('tools/*.py')`，失敗訊息列兩邊差異 + 叫人一起改）、`test_hook_scripts_documented`（兩支 hook script 都在表格）、`test_no_undocumented_or_phantom_paths`（表格列的每條 backtick 路徑都指向真實檔案，抓 typo / 文件了但沒 commit 的工具）、`test_hook_scripts_exist_on_disk`（current state 正向 anchor）
+- 為什麼 parser 放 test 而非 production：與 M18 / M19 同理——讓 production 工具 runtime 去讀自己的 README 是不必要耦合。文件↔工具樹一致性是 test-only 的 cross-file 不變量，放 test 最乾淨
+- 不動 production code：converter / 兩支 checker / aggregate runner / hook / `.gitattributes` / CI workflow 全部沒改。純新增一份 README + 一支 test 檔，沿用 M14 / M18 / M19 的「production code 一行不動」模式
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已跑 `python3 -m unittest discover -s tools/tests`，6 個新 test 自動 pick up——守的正是這份新 README 與工具樹的一致性
+- 負向驗證（確認 guard 真的會咬）：暫時 `touch tools/_phantom_tool.py` → `test_all_toplevel_py_tools_documented` FAIL 並印出 `documented: [...]` vs `on disk: [..., 'tools/_phantom_tool.py']` + 修復指引；`rm` 還原後 → OK
+- 本地驗證：
+  - `python3 tools/tests/test_readme.py -v` → `Ran 6 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 157 tests OK`（M8 31+12+4 + M9 9+19+6 + M10 31 + M11→M12 13 + M17 18+6 + M20 6）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 看 toolchain 參考文件
+cat tools/README.md
+
+# 只跑 M20 新增的 parity class
+python3 -m unittest tools.tests.test_readme.ReadmeParityTests
+python3 -m unittest tools.tests.test_readme.ReadmeParityTests -v
+```
+
+#### 副作用 / 注意
+- `_TOOL_ROW_RE` 只認「表格第一欄是 backtick-wrapped `tools/...` 路徑」這種列。若日後改用別種文件格式列出工具（bullet list / 不同欄位順序），`test_tools_table_shape` 會先紅，提醒同步改 parser（不會 silently 讀成空表）
+- 這條 guard 只比對 top-level `tools/*.py`（4 支）與 2 支 hook script；不檢查 `tools/tests/*.py`（test 檔由 discover 自動 pick up，不需逐個文件化）。若日後在 `tools/` 新增非 test 的子目錄工具，要擴充 `_TOPLEVEL_PY_RE` 與比對邏輯
+- 至此 toolchain 的「reference 文件」與「歷史 log」分工確立：`tools/README.md`（怎麼用，被 test 鎖住與工具樹一致）+ `docs/progress-ipynb-to-py.md`（為什麼這樣做，chronological）
