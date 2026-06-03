@@ -1,16 +1,21 @@
 """Parity tests for tools/README.md against the actual tools/ tree.
 
 Stdlib-only unittest. tools/README.md is the toolchain reference doc (M20);
-its "## Tools" table lists every shipped tool. Nothing stops that table from
-silently rotting when a tool is added / removed / renamed -- exactly the
-"true only by convention" gap that M9 (orphan detection), M18 (check_all == CI
-workflow) and M19 (.gitattributes == _HANDWRITTEN_DIR_PARTS) each closed by
-locking the invariant into a test. These tests are the same move for the
-README: the documented tool set must equal the real tool set.
+its "## Tools" table lists every shipped tool and its "## 測試" table lists
+every test module. Nothing stops either table from silently rotting when a
+tool / test module is added / removed / renamed -- exactly the "true only by
+convention" gap that M9 (orphan detection), M18 (check_all == CI workflow) and
+M19 (.gitattributes == _HANDWRITTEN_DIR_PARTS) each closed by locking the
+invariant into a test. These tests are the same move for the README: the
+documented tool set must equal the real tool set, and the documented test set
+must equal the real test set.
+
+  - ReadmeParityTests          -- "## Tools" table  vs  tools/*.py + hooks (M20)
+  - ReadmeTestTableParityTests -- "## 測試" table   vs  tools/tests/test_*.py (M21)
 
 The yaml/gitattributes guards parse a sibling config file; here we parse the
-README's Tools table with a deliberately narrow regex and assert its shape
-first (test_tools_table_shape) so a reformat fails loudly rather than being
+README's tables with deliberately narrow regexes and assert each table's shape
+first (test_*_table_shape) so a reformat fails loudly rather than being
 mis-read as an empty table.
 
 Run:
@@ -31,14 +36,16 @@ README = TOOLS / 'README.md'
 
 # A table data row whose first cell is a backticked `tools/...` path.
 _TOOL_ROW_RE = re.compile(r'^\|\s*`(tools/[^`]+)`\s*\|')
+# A table data row whose first cell is a backticked `tools/tests/...` path.
+_TEST_ROW_RE = re.compile(r'^\|\s*`(tools/tests/[^`]+)`\s*\|')
 # The 4 shipped Python tools live at tools/<name>.py (no deeper nesting).
 _TOPLEVEL_PY_RE = re.compile(r'^tools/[^/]+\.py$')
 # Hook scripts that must also be documented.
 _HOOK_PATHS = {'tools/hooks/pre-commit', 'tools/hooks/install.sh'}
 
 
-def _tools_section() -> list[str]:
-    """Lines of the README's `## Tools` section (up to the next `## ` header)."""
+def _section(header: str) -> list[str]:
+    """Lines under a `## <header>` section (up to the next `## ` header)."""
     lines = README.read_text(encoding='utf-8').splitlines()
     out: list[str] = []
     in_section = False
@@ -46,11 +53,21 @@ def _tools_section() -> list[str]:
         if ln.startswith('## '):
             if in_section:
                 break
-            in_section = ln.strip() == '## Tools'
+            in_section = ln.strip() == f'## {header}'
             continue
         if in_section:
             out.append(ln)
     return out
+
+
+def _tools_section() -> list[str]:
+    """Lines of the README's `## Tools` section."""
+    return _section('Tools')
+
+
+def _tests_section() -> list[str]:
+    """Lines of the README's `## 測試` section."""
+    return _section('測試')
 
 
 def _documented_tool_paths() -> set[str]:
@@ -63,8 +80,26 @@ def _documented_tool_paths() -> set[str]:
     return paths
 
 
+def _documented_test_paths() -> set[str]:
+    """Backticked `tools/tests/...` paths in the first column of the 測試 table.
+
+    Anchored to `^|` so the `python3 tools/tests/...` lines in the section's
+    fenced code block are not mistaken for table rows.
+    """
+    paths: set[str] = set()
+    for ln in _tests_section():
+        m = _TEST_ROW_RE.match(ln)
+        if m:
+            paths.add(m.group(1))
+    return paths
+
+
 def _actual_toplevel_py() -> set[str]:
     return {f'tools/{p.name}' for p in TOOLS.glob('*.py')}
+
+
+def _actual_test_files() -> set[str]:
+    return {f'tools/tests/{p.name}' for p in (TOOLS / 'tests').glob('test_*.py')}
 
 
 class ReadmeParityTests(unittest.TestCase):
@@ -122,6 +157,64 @@ class ReadmeParityTests(unittest.TestCase):
         # meaningful if both sides describe existing files).
         for hook in sorted(_HOOK_PATHS):
             self.assertTrue((REPO / hook).is_file(), f'missing hook script: {hook}')
+
+
+class ReadmeTestTableParityTests(unittest.TestCase):
+    """The README "## 測試" table must list exactly the real test_*.py files.
+
+    M20's ReadmeParityTests locked the "## Tools" table against tools/*.py +
+    hooks but left the test-file table unguarded -- add / remove / rename a
+    test module and the doc silently rots. This is the same parity move,
+    applied to tools/tests/.
+    """
+
+    def test_tests_table_shape(self):
+        # Guards the narrow parser: the 測試 section must contain a markdown
+        # table (header separator row) and at least one `tools/tests/...` data
+        # row. A reformat away from this shape fails loudly so the parser gets
+        # updated rather than silently reading zero test files (mirrors
+        # ReadmeParityTests.test_tools_table_shape).
+        section = _tests_section()
+        self.assertTrue(section, 'no "## 測試" section in README')
+        self.assertTrue(
+            any(re.match(r'^\|[\s:|-]+\|', ln) for ln in section),
+            '測試 section has no markdown table separator row',
+        )
+        self.assertTrue(
+            _documented_test_paths(),
+            '測試 table has no `tools/tests/...` rows; update _TEST_ROW_RE',
+        )
+
+    def test_all_test_files_documented(self):
+        # Core drift guard: documented set == real test_*.py set.
+        documented = _documented_test_paths()
+        actual = _actual_test_files()
+        self.assertEqual(
+            documented, actual,
+            'tools/README.md "## 測試" table drifted from the real '
+            'tools/tests/test_*.py set.\n'
+            f'  documented: {sorted(documented)}\n'
+            f'  on disk:    {sorted(actual)}\n'
+            'Update the "## 測試" table in tools/README.md and the '
+            'tools/tests/ tree together.',
+        )
+
+    def test_no_undocumented_or_phantom_test_paths(self):
+        # Every backticked path in the table must point at a real file (catches
+        # typos / a test module documented but never committed).
+        for path in sorted(_documented_test_paths()):
+            self.assertTrue(
+                (REPO / path).exists(),
+                f'README 測試 table lists `{path}` but it does not exist',
+            )
+
+    def test_test_files_exist_on_disk(self):
+        # Positive anchor: parity is only meaningful if both sides describe
+        # existing files.
+        actual = _actual_test_files()
+        self.assertTrue(actual, 'no tools/tests/test_*.py files found')
+        for path in sorted(actual):
+            self.assertTrue((REPO / path).is_file(), f'missing test file: {path}')
 
 
 if __name__ == '__main__':

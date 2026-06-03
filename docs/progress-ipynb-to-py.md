@@ -25,6 +25,7 @@
 - **M18** — CI parity drift guard：M17 把 `check_all.py` 寫成「step-for-step 對齊 `ipynb-py-sync.yml`」，但沒有任何東西強制兩者保持同步——改了 workflow yaml（加/刪/重排 step、拿掉 `--strict`）卻忘了改 `check_all.py`，「local == CI」承諾就會 silently 腐爛。M18 補 `WorkflowParityTests`（6 個 test 進 `tools/tests/test_check_all.py`），純 stdlib 解析 workflow yaml 的 `run:` 指令、normalize 成 `(tool, long_flags)` signature，與 `build_steps('.')` 做 ordered 比對。沿用 M9（orphan）/ M14（sync main paths）precedent：把「只靠慣例成立」的不變量變成「靠 test 成立」。不動 production code。
 - **M19** — `.gitattributes` ↔ sync-checker hand-written-dir parity guard：把「什麼算 hand-written Python」這個同時寫在 `.gitattributes`（`tools/**/*.py linguist-generated=false`）與 `check_ipynb_py_sync._HANDWRITTEN_DIR_PARTS` 的概念用 `GitattributesParityTests`（6 個 test）鎖死，兩邊不一致就 fail。
 - **M20** — `tools/README.md` toolchain 參考文件 + README↔tools/ parity guard：toolchain 已長到 4 支 Python 工具 + 2 支 hook script + CI + 157 test，但知識只散在 chronological 的 `docs/progress-ipynb-to-py.md`，沒有一份可當 reference 的入口文件。M20 補 `tools/README.md`（工具一覽表、常用指令、hook 安裝、CI 對應、測試清單、失敗修法），並依 M18 / M19 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeParityTests`（6 個 test，純 stdlib），把 README「## Tools」表格列出的工具集合鎖死 == 實際 `tools/*.py` + 2 支 hook script，文件再也不能 silently 與實際工具樹漂移。不動 production code。
+- **M21** — README「## 測試」table ↔ `tools/tests/test_*.py` parity guard：M20 的 `ReadmeParityTests` 只鎖了「## Tools」表格（production 工具 + hook）對 `tools/*.py`，但同一份 README 的「## 測試」表格（列出 6 支 test 檔）完全沒被守——新增 / 刪除 / rename 一支 test module，文件就 silently 腐爛。M21 依 M20 precedent 把 `_tools_section()` 抽成通用 `_section(header)`，補 `tools/tests/test_readme.py` 的 `ReadmeTestTableParityTests`（4 個 test，純 stdlib），把「## 測試」表格列出的 test 集合鎖死 == 實際 `glob('tools/tests/test_*.py')`。關掉 README 最後一張未被守的表。不動 production code。
 
 ## 進度日誌
 
@@ -682,3 +683,35 @@ python3 -m unittest tools.tests.test_readme.ReadmeParityTests -v
 - `_TOOL_ROW_RE` 只認「表格第一欄是 backtick-wrapped `tools/...` 路徑」這種列。若日後改用別種文件格式列出工具（bullet list / 不同欄位順序），`test_tools_table_shape` 會先紅，提醒同步改 parser（不會 silently 讀成空表）
 - 這條 guard 只比對 top-level `tools/*.py`（4 支）與 2 支 hook script；不檢查 `tools/tests/*.py`（test 檔由 discover 自動 pick up，不需逐個文件化）。若日後在 `tools/` 新增非 test 的子目錄工具，要擴充 `_TOPLEVEL_PY_RE` 與比對邏輯
 - 至此 toolchain 的「reference 文件」與「歷史 log」分工確立：`tools/README.md`（怎麼用，被 test 鎖住與工具樹一致）+ `docs/progress-ipynb-to-py.md`（為什麼這樣做，chronological）
+
+### M21 — README「## 測試」table ↔ `tools/tests/test_*.py` parity guard
+- 為什麼補：M20 的 `ReadmeParityTests` 只把 README「## Tools」表格（4 支 production 工具 + 2 支 hook script）對 `tools/*.py` 鎖死，但**同一份 README 還有第二張表格——「## 測試」table（lines 92–99，列出 6 支 test 檔 + 各自覆蓋對象）完全沒被守**。M20 進度文末甚至寫了「不檢查 `tools/tests/*.py`（test 檔由 discover 自動 pick up，不需逐個文件化）」——但這句只在「不需要為了被 CI 跑到而文件化」的意義上成立；README 既然**已經主動列了一張 test 表**，那張表就跟 Tools 表一樣會 silently 腐爛（新增 / 刪 / rename 一支 test module，表格忘了同步改也沒人會發現）。這是 README 裡最後一張沒上鎖的表，剛好是 M20 gap 的鏡像
+- 解法（純測試新增，不動 production code）：
+  - 小重構 `tools/tests/test_readme.py`：把 `_tools_section()`（line-scan「## Tools」到下一個 `## ` header）抽成通用 `_section(header)`，`_tools_section()` / 新增的 `_tests_section()` 都變成 `_section('Tools')` / `_section('測試')` 的薄包裝。消掉複製貼上，且既有 `ReadmeParityTests` 的 6 個 test 行為完全不變
+  - 新增 `_TEST_ROW_RE`（`^\|\s*` + backtick-wrapped `tools/tests/...` 路徑）、`_documented_test_paths()`（抓「## 測試」表格第一欄）、`_actual_test_files()`（`glob('tools/tests/test_*.py')`）
+  - **`_TEST_ROW_RE` 刻意 anchor 到 `^|`**：「## 測試」section 內除了表格，還有一段 fenced code block 含 `python3 tools/tests/test_check_all.py -v` 這種行；anchor 到 row 開頭的 `|` 才不會把 code block 行誤判成表格列。docstring 寫明此理由
+  - 新增 `ReadmeTestTableParityTests`（4 個 case，依 M20 precedent）：
+    - `test_tests_table_shape` — **守 parser 假設**：「## 測試」section 必須有 markdown table separator row + 至少一條 `tools/tests/...` 資料列；被 reformat 就 loudly fail（同 M20 `test_tools_table_shape`、M18 `test_no_multiline_run_blocks`、M19 `test_override_patterns_have_expected_shape` precedent）
+    - `test_all_test_files_documented` — **核心 drift guard**：documented test 集合 == 實際 `glob('tools/tests/test_*.py')`，失敗訊息列兩邊差異 + 叫人一起改
+    - `test_no_undocumented_or_phantom_test_paths` — 表格列的每條 backtick 路徑都指向真實檔案（抓 typo / 文件了但沒 commit 的 test module）
+    - `test_test_files_exist_on_disk` — current state 正向 anchor（兩邊都描述存在的檔案，parity 才有意義）
+- 為什麼 `glob('test_*.py')` 而非 `glob('*.py')`：`tools/tests/` 下只有 `test_*.py`（無 `__init__.py`／`conftest.py`，M8 已確認 unittest discover 用 namespace package 不需 `__init__.py`），且 README 表格列的正是 `test_...py`。用 `test_*.py` 精準對齊文件化對象，不會把未來可能加的 helper module 誤算進來（若日後加了非 `test_` 前綴的共用 helper 又想文件化，要擴 glob pattern）
+- 為什麼 parser 放 test 而非 production：與 M18 / M19 / M20 同理——讓 production 工具 runtime 去讀自己的 README 是不必要耦合。文件↔測試樹一致性是 test-only 的 cross-file 不變量，放 test 最乾淨
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已跑 `python3 -m unittest discover -s tools/tests`，4 個新 test 自動 pick up——守的正是 README 第二張表與 test 樹的一致性
+- 負向驗證（確認 guard 真的會咬）：暫時 `touch tools/tests/test_phantom_m21.py` → `test_all_test_files_documented` FAIL 並印出 `documented: [...6...]` vs `on disk: [...7 含 test_phantom_m21...]` + 修復指引；`rm` 還原後 → OK
+- 本地驗證：
+  - `python3 tools/tests/test_readme.py -v` → `Ran 10 tests OK`（M20 6 + M21 4）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 161 tests OK`（M8 31+12+4 + M9 9+19+6 + M10 31 + M11→M12 13 + M17 18+6 + M20 6 + M21 4）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M21 新增的 class
+python3 -m unittest tools.tests.test_readme.ReadmeTestTableParityTests
+python3 -m unittest tools.tests.test_readme.ReadmeTestTableParityTests -v
+```
+
+#### 副作用 / 注意
+- 至此 `tools/README.md` 的**兩張表格都上鎖**：「## Tools」（M20，對 `tools/*.py` + hook）+「## 測試」（M21，對 `tools/tests/test_*.py`）。README 再也沒有可 silently 與實際樹漂移的清單
+- `_TEST_ROW_RE` 同 M20 `_TOOL_ROW_RE` 只認「表格第一欄是 backtick-wrapped 路徑」這種列；若日後改用別種格式列 test（bullet list / 不同欄位順序），`test_tests_table_shape` 會先紅提醒改 parser
+- 此 guard 只比對 `tools/tests/test_*.py`；不檢查 `tools/tests/` 下其他可能的非 test 檔。M20 文末那句「不需逐個文件化」現在精確化為：**不需為了被 CI 跑到而文件化，但既然 README 列了就得守一致**
