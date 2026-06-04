@@ -26,6 +26,7 @@
 - **M19** — `.gitattributes` ↔ sync-checker hand-written-dir parity guard：把「什麼算 hand-written Python」這個同時寫在 `.gitattributes`（`tools/**/*.py linguist-generated=false`）與 `check_ipynb_py_sync._HANDWRITTEN_DIR_PARTS` 的概念用 `GitattributesParityTests`（6 個 test）鎖死，兩邊不一致就 fail。
 - **M20** — `tools/README.md` toolchain 參考文件 + README↔tools/ parity guard：toolchain 已長到 4 支 Python 工具 + 2 支 hook script + CI + 157 test，但知識只散在 chronological 的 `docs/progress-ipynb-to-py.md`，沒有一份可當 reference 的入口文件。M20 補 `tools/README.md`（工具一覽表、常用指令、hook 安裝、CI 對應、測試清單、失敗修法），並依 M18 / M19 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeParityTests`（6 個 test，純 stdlib），把 README「## Tools」表格列出的工具集合鎖死 == 實際 `tools/*.py` + 2 支 hook script，文件再也不能 silently 與實際工具樹漂移。不動 production code。
 - **M21** — README「## 測試」table ↔ `tools/tests/test_*.py` parity guard：M20 的 `ReadmeParityTests` 只鎖了「## Tools」表格（production 工具 + hook）對 `tools/*.py`，但同一份 README 的「## 測試」表格（列出 6 支 test 檔）完全沒被守——新增 / 刪除 / rename 一支 test module，文件就 silently 腐爛。M21 依 M20 precedent 把 `_tools_section()` 抽成通用 `_section(header)`，補 `tools/tests/test_readme.py` 的 `ReadmeTestTableParityTests`（4 個 test，純 stdlib），把「## 測試」表格列出的 test 集合鎖死 == 實際 `glob('tools/tests/test_*.py')`。關掉 README 最後一張未被守的表。不動 production code。
+- **M22** — README「## CI 對應」numbered list ↔ CI workflow parity guard：M18 把 `check_all.build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 的 run-steps 用 `WorkflowParityTests` 互鎖，但同一條 CI step 序列在 `tools/README.md`「## CI 對應」段還有**第三份手寫副本**（4 步 numbered list，內嵌 backtick 指令）完全沒被守——改了 workflow / `check_all` 的步驟卻忘了改 README，這份「文件版 CI 流程」就 silently 腐爛。M22 依 M18 / M20 / M21 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiParityTests`（6 個 test，純 stdlib），解析 README CI 段的 numbered backtick 指令，**復用** M18 的 `_step_signature` / `_workflow_run_commands`（同一套 normalization）把它與 workflow run-steps 做 ordered 比對。透過 M18 的 workflow == build_steps 互鎖，傳遞性保證 README == workflow == `check_all`。關掉 README 最後一份未被守的 CI step 清單。不動 production code。
 
 ## 進度日誌
 
@@ -715,3 +716,43 @@ python3 -m unittest tools.tests.test_readme.ReadmeTestTableParityTests -v
 - 至此 `tools/README.md` 的**兩張表格都上鎖**：「## Tools」（M20，對 `tools/*.py` + hook）+「## 測試」（M21，對 `tools/tests/test_*.py`）。README 再也沒有可 silently 與實際樹漂移的清單
 - `_TEST_ROW_RE` 同 M20 `_TOOL_ROW_RE` 只認「表格第一欄是 backtick-wrapped 路徑」這種列；若日後改用別種格式列 test（bullet list / 不同欄位順序），`test_tests_table_shape` 會先紅提醒改 parser
 - 此 guard 只比對 `tools/tests/test_*.py`；不檢查 `tools/tests/` 下其他可能的非 test 檔。M20 文末那句「不需逐個文件化」現在精確化為：**不需為了被 CI 跑到而文件化，但既然 README 列了就得守一致**
+
+### M22 — README「## CI 對應」numbered list ↔ CI workflow parity guard
+- 為什麼補：M18 的 `WorkflowParityTests` 把 `check_all.build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 的 run-steps 互鎖，但同一條 CI step 序列在 `tools/README.md`「## CI 對應」段（M20 寫的）還有**第三份手寫副本**——4 步 numbered list，每步內嵌一行 backtick 指令。M18 / M20 / M21 把 workflow、README 兩張表格都上鎖了，唯獨這份「文件版 CI 流程」沒人守：改了 workflow / `check_all` 的步驟（加減步、拿掉 `--strict`、重排）卻忘了同步 README，這段就 silently 與真實 CI 漂移。這正是 M9（orphan）/ M18（CI parity）/ M20-M21（README 表格）反覆關掉的「只靠慣例成立」缺口
+- 解法：在 `tools/tests/test_readme.py` 新增 `ReadmeCiParityTests`（6 個 test，純 stdlib）
+  - **復用 M18 的 normalization**：`from test_check_all import _step_signature, _workflow_run_commands`。README CI 段的指令解析後用**同一套** `_step_signature`（reduce 成 `(tool, frozenset(long_flags))`，忽略 interpreter / path prefix / 尾端 root arg / single-dash flag）與 workflow run-commands 做 ordered 比對。透過 M18 已鎖的 workflow == build_steps，傳遞性保證 **README == workflow == `check_all`**，三份副本任一漂移都會紅
+  - 為什麼比對 workflow 而非 build_steps：workflow yaml 是「CI 實際跑什麼」的 source of truth，README CI 段宣稱文件化的正是它；兩邊都是「人寫的指令字串」（可 `shlex.split`），是最 apples-to-apples 的比對。build_steps 已由 M18 鎖到 workflow，不必再直接比一次
+  - 新增 parser：`_CI_STEP_RE = ^\d+\.\s+\`([^\`]+)\`` 只認「numbered list item 且內容以 backtick 指令開頭」，所以段落 prose 行裡的 inline code（如 `` `.github/workflows/...` ``）不會被誤當步驟；`_ci_section()` 復用 M21 抽出的通用 `_section(header)`
+- 6 個 test：
+  - `test_ci_section_exists` — 「## CI 對應」段存在且非空
+  - `test_ci_section_shape` — 段內至少解析到一個 `N. \`cmd\`` 步驟（narrow parser 守門，reformat 走樣會先紅提醒改 `_CI_STEP_RE`，同 M20/M21 的 `*_table_shape`）
+  - `test_ci_step_count_matches_workflow` — 文件步數 == workflow run-step 數
+  - `test_ci_step_signatures_match_workflow_in_order` — **核心 guard**：`(tool, long_flags)` 序列逐項相等，失敗印 README vs workflow 兩側 sig + 修復指引（提醒同步 README / workflow / `check_all`）
+  - `test_ci_tools_in_expected_order` — tool basename 序列 == `[unittest, ipynb_to_py.py, check_ipynb_py_sync.py, check_converted_py.py]`（與 M18 `test_tools_invoked_in_expected_order` 對稱）
+  - `test_ci_commands_reference_real_tools` — phantom guard：CI 段指令裡每個 `.py` 都得在磁碟上存在（抓 typo / 文件列了但沒 commit 的工具）
+- 跨 invocation mode 的 import robustness：`_step_signature` / `_workflow_run_commands` 是 `test_check_all` 的 module-level helper。test_readme 在 import 前先 `sys.path.insert(0, HERE)`（HERE = `tools/tests/`），讓 `from test_check_all import ...` 在三種跑法都成立——
+  1. 直接跑檔 `python3 tools/tests/test_readme.py`（HERE 本來就是 sys.path[0]）
+  2. discover `python3 -m unittest discover -s tools/tests`（discover 把 start dir 推進 sys.path）
+  3. dotted `python3 -m unittest tools.tests.test_readme`（靠這次的 explicit insert 才成立）
+  - `test_check_all` 自己 import 時會 insert `tools/` 供 `import check_all`，所以 helper 鏈完整。為什麼復用而非在 test_readme 重抄一份 `_step_signature`：抄一份會與 M18 的 normalization 各自演化、可能 silently 不一致；復用確保「README guard 用的正是 workflow guard 用的同一把尺」
+- 為什麼 parser / guard 放 test 而非 production：同 M18 / M19 / M20 / M21——讓 production 工具 runtime 去讀自己的 README 是不必要耦合。文件↔CI 一致性是 test-only 的 cross-file 不變量
+- 不需動 production code：`tools/README.md` 既有 CI 段已與 workflow 相符（guard 一寫就綠），純測試新增。`check_all.py` / workflow / converter 全部沒改
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已跑 `python3 -m unittest discover -s tools/tests`，6 個新 test 自動 pick up
+- 負向驗證（確認 guard 真的會咬）：暫時把 README CI 段第 2 步的 `--strict` 拿掉 → `test_ci_step_signatures_match_workflow_in_order` FAIL 並印出 README vs workflow 兩側 sig 差異 + 修復指引；還原後 → OK
+- 本地驗證：
+  - `python3 tools/tests/test_readme.py -v` → `Ran 16 tests OK`（M20 6 + M21 4 + M22 6）
+  - `python3 -m unittest tools.tests.test_readme.ReadmeCiParityTests -v` → `Ran 6 tests OK`（dotted mode 也通過，驗證 import robustness）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 167 tests OK`（M8 31+12+4 + M9 9+19+6 + M10 31 + M11→M12 13 + M17 18+6 + M20 6 + M21 4 + M22 6）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M22 新增的 class
+python3 -m unittest tools.tests.test_readme.ReadmeCiParityTests
+python3 -m unittest tools.tests.test_readme.ReadmeCiParityTests -v
+```
+
+#### 副作用 / 注意
+- 至此 CI step 序列的**三份副本全部互鎖**：workflow yaml（M18 對 build_steps）+ `check_all.build_steps()`（M18 對 workflow）+ README「## CI 對應」（M22 對 workflow）。改 CI 流程必須三處同步，任一漏改都有 test 會紅
+- `ReadmeCiParityTests` 跨 test 模組 import `test_check_all` 的 helper；若日後把 `_step_signature` / `_workflow_run_commands` 改名或移走，test_readme 的 import 會先 ImportError——這是預期的耦合訊號（兩個 parity guard 本就該共用同一把尺），不是 bug
+- `_CI_STEP_RE` 只認 numbered list（`N. `）+ 行首 backtick 指令；若日後 README 改用 bullet list 或別種步驟格式，`test_ci_section_shape` 會先紅提醒改 parser

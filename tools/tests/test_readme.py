@@ -12,11 +12,18 @@ must equal the real test set.
 
   - ReadmeParityTests          -- "## Tools" table  vs  tools/*.py + hooks (M20)
   - ReadmeTestTableParityTests -- "## 測試" table   vs  tools/tests/test_*.py (M21)
+  - ReadmeCiParityTests        -- "## CI 對應" list  vs  CI workflow run-steps (M22)
 
 The yaml/gitattributes guards parse a sibling config file; here we parse the
 README's tables with deliberately narrow regexes and assert each table's shape
 first (test_*_table_shape) so a reformat fails loudly rather than being
 mis-read as an empty table.
+
+M22's ReadmeCiParityTests reuses M18's _step_signature / _workflow_run_commands
+(from test_check_all) so the README CI list is normalized against the exact same
+contract that already locks the workflow == build_steps. The HERE-on-sys.path
+insert below makes that bare import work in every invocation mode (direct file,
+`unittest discover`, and dotted `-m unittest tools.tests.test_readme`).
 
 Run:
     python3 tools/tests/test_readme.py
@@ -26,6 +33,8 @@ Run:
 from __future__ import annotations
 
 import re
+import shlex
+import sys
 import unittest
 from pathlib import Path
 
@@ -33,6 +42,12 @@ HERE = Path(__file__).resolve().parent
 TOOLS = HERE.parent
 REPO = TOOLS.parent
 README = TOOLS / 'README.md'
+
+# Reuse M18's normalization + workflow parser so the README CI guard shares the
+# identical (tool, long_flags) contract that locks workflow == build_steps.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from test_check_all import _step_signature, _workflow_run_commands  # noqa: E402
 
 # A table data row whose first cell is a backticked `tools/...` path.
 _TOOL_ROW_RE = re.compile(r'^\|\s*`(tools/[^`]+)`\s*\|')
@@ -100,6 +115,31 @@ def _actual_toplevel_py() -> set[str]:
 
 def _actual_test_files() -> set[str]:
     return {f'tools/tests/{p.name}' for p in (TOOLS / 'tests').glob('test_*.py')}
+
+
+# A numbered-list item whose content starts with a backticked command, e.g.
+#   1. `python3 tools/check_converted_py.py .` -- 產物驗證
+_CI_STEP_RE = re.compile(r'^\d+\.\s+`([^`]+)`')
+
+
+def _ci_section() -> list[str]:
+    """Lines of the README's `## CI 對應` section."""
+    return _section('CI 對應')
+
+
+def _documented_ci_commands() -> list[str]:
+    """Backticked commands from the `## CI 對應` numbered list, in order.
+
+    Anchored to `^\\d+\\.` (after strip) so the inline-code spans in the
+    section's prose lines (e.g. ``.github/workflows/...``) are not mistaken for
+    steps -- only the numbered list items count.
+    """
+    cmds: list[str] = []
+    for ln in _ci_section():
+        m = _CI_STEP_RE.match(ln.strip())
+        if m:
+            cmds.append(m.group(1))
+    return cmds
 
 
 class ReadmeParityTests(unittest.TestCase):
@@ -215,6 +255,74 @@ class ReadmeTestTableParityTests(unittest.TestCase):
         self.assertTrue(actual, 'no tools/tests/test_*.py files found')
         for path in sorted(actual):
             self.assertTrue((REPO / path).is_file(), f'missing test file: {path}')
+
+
+class ReadmeCiParityTests(unittest.TestCase):
+    """The README "## CI 對應" numbered list must match the CI workflow steps.
+
+    M18's WorkflowParityTests locks check_all.build_steps() == the workflow yaml
+    run-steps, but the README's "## CI 對應" section is a *third* hand-written
+    copy of that same ordered step sequence -- change the steps and this doc list
+    silently rots. This guard parses the README list, normalizes each command
+    with M18's _step_signature, and compares it (in order) against the workflow
+    run-commands. Via M18's workflow == build_steps lock this transitively pins
+    README == workflow == check_all.
+    """
+
+    def test_ci_section_exists(self):
+        self.assertTrue(_ci_section(), 'no "## CI 對應" section in README')
+
+    def test_ci_section_shape(self):
+        # Guards the narrow parser: the section must contain a numbered list with
+        # at least one backticked command. A reformat away from this shape fails
+        # loudly so the parser gets updated rather than silently reading zero
+        # steps (mirrors test_tools_table_shape / test_tests_table_shape).
+        self.assertTrue(
+            _documented_ci_commands(),
+            'CI 對應 section has no `N. `cmd`` steps; update _CI_STEP_RE',
+        )
+
+    def test_ci_step_count_matches_workflow(self):
+        self.assertEqual(
+            len(_documented_ci_commands()), len(_workflow_run_commands()),
+            'README "## CI 對應" lists a different number of steps than the CI '
+            'workflow runs.',
+        )
+
+    def test_ci_step_signatures_match_workflow_in_order(self):
+        # Core drift guard: documented (tool, long_flags) sequence == workflow's.
+        doc_sigs = [_step_signature(shlex.split(c)) for c in _documented_ci_commands()]
+        wf_sigs = [_step_signature(shlex.split(c)) for c in _workflow_run_commands()]
+        self.assertEqual(
+            doc_sigs, wf_sigs,
+            'tools/README.md "## CI 對應" list drifted from the CI workflow '
+            'run-steps.\n'
+            f'  README:   {doc_sigs}\n'
+            f'  workflow: {wf_sigs}\n'
+            'Update the "## CI 對應" section in tools/README.md and '
+            '.github/workflows/ipynb-py-sync.yml together (and check_all.py, '
+            'which M18 locks to the workflow).',
+        )
+
+    def test_ci_tools_in_expected_order(self):
+        tools = [_step_signature(shlex.split(c))[0] for c in _documented_ci_commands()]
+        self.assertEqual(tools, [
+            'unittest',
+            'ipynb_to_py.py',
+            'check_ipynb_py_sync.py',
+            'check_converted_py.py',
+        ])
+
+    def test_ci_commands_reference_real_tools(self):
+        # Phantom guard: every `.py` script named in the list must exist on disk
+        # (catches a typo / a tool documented in the CI list but never committed).
+        for cmd in _documented_ci_commands():
+            for tok in shlex.split(cmd):
+                if tok.endswith('.py'):
+                    self.assertTrue(
+                        (REPO / tok).exists(),
+                        f'README CI list names `{tok}` but it does not exist',
+                    )
 
 
 if __name__ == '__main__':
