@@ -56,7 +56,7 @@ _TEST_ROW_RE = re.compile(r'^\|\s*`(tools/tests/[^`]+)`\s*\|')
 # The 4 shipped Python tools live at tools/<name>.py (no deeper nesting).
 _TOPLEVEL_PY_RE = re.compile(r'^tools/[^/]+\.py$')
 # Hook scripts that must also be documented.
-_HOOK_PATHS = {'tools/hooks/pre-commit', 'tools/hooks/install.sh'}
+_HOOK_PATHS = {'tools/hooks/pre-commit', 'tools/hooks/pre-push', 'tools/hooks/install.sh'}
 
 
 def _section(header: str) -> list[str]:

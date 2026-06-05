@@ -19,7 +19,8 @@
 | `tools/check_converted_py.py` | converted-py validator（產物驗證） | 對每個生成 `.py` 跑 `py_compile` + magic-leak 掃描 |
 | `tools/check_all.py` | aggregate runner（本地一鍵） | step-for-step 對齊 CI workflow，一條指令重現 CI 把關 |
 | `tools/hooks/pre-commit` | git hook | stage `.ipynb` 時自動重生 `.py` 一起 commit；delete / rename 時自動 `git rm` 孤兒 `.py` |
-| `tools/hooks/install.sh` | hook installer | 把 `pre-commit` symlink 進 `.git/hooks/`（idempotent，會 backup 既有 hook） |
+| `tools/hooks/pre-push` | git hook | push 前跑 `check_all.py --skip-tests`（CI step 2-4），artifacts 不同步就擋下 push |
+| `tools/hooks/install.sh` | hook installer | 把 `pre-commit` / `pre-push` symlink 進 `.git/hooks/`（idempotent，會 backup 既有 hook） |
 
 ## 常用指令
 
@@ -51,19 +52,27 @@ python3 tools/check_all.py --quiet        # checker 只印 summary
 python3 tools/check_all.py --skip-tests   # 略過 unittest step（快速 wiring 檢查）
 ```
 
-## 安裝 pre-commit hook
+## 安裝 git hooks
 
 ```bash
 tools/hooks/install.sh
-# 之後 commit 任何 .ipynb 變更時，對應的 .py 會被自動重生並 stage；
-# .ipynb 被刪 / rename 時對應的 .py 也會被自動 git rm。
+# 一次裝兩個 hook：
+#   pre-commit — commit 任何 .ipynb 變更時自動重生 / 同步對應的 .py；
+#                .ipynb 被刪 / rename 時對應的 .py 也會被自動 git rm。
+#   pre-push   — push 前跑 check_all.py --skip-tests（CI step 2-4），
+#                .py 與 .ipynb 不同步 / 無法 compile 就擋下 push。
 ```
 
 手動安裝（不想跑 install.sh）：
 
 ```bash
 ln -sf ../../tools/hooks/pre-commit .git/hooks/pre-commit
+ln -sf ../../tools/hooks/pre-push   .git/hooks/pre-push
 ```
+
+> `pre-push` 刻意只跑 `--skip-tests`（CI step 2-4 的 artifact 檢查），不跑
+> unittest step（CI step 1）：單元測試驗的是 toolchain 本身、不是你要 push 的
+> notebook，CI 仍會跑。要跳過 hook：`git push --no-verify`。
 
 ## CI 對應
 
@@ -94,7 +103,7 @@ python3 -m unittest tools.tests.test_check_all.WorkflowParityTests
 | `tools/tests/test_ipynb_to_py.py` | converter helper + `main()` CLI（含 `--strict` / `--dry-run`） |
 | `tools/tests/test_check_ipynb_py_sync.py` | sync checker `main()` / `_pairs` / `_diff_preview` / `_orphan_py` + `.gitattributes` parity |
 | `tools/tests/test_check_converted_py.py` | validator `MAGIC_RE` / `_paired_py_files` / `_compile_check` / `_magic_check` / `main()` |
-| `tools/tests/test_pre_commit_hook.py` | hook + `install.sh`（每 test 起自有 temp git repo 跑真實 hook） |
+| `tools/tests/test_pre_commit_hook.py` | hooks（pre-commit / pre-push）+ `install.sh`（每 test 起自有 temp git repo 跑真實 hook） |
 | `tools/tests/test_check_all.py` | aggregate runner + CI workflow parity guard |
 | `tools/tests/test_readme.py` | 本 README 的 tool 清單 ↔ 實際 `tools/` 檔案 parity guard |
 

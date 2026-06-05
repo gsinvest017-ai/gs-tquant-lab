@@ -27,6 +27,7 @@
 - **M20** — `tools/README.md` toolchain 參考文件 + README↔tools/ parity guard：toolchain 已長到 4 支 Python 工具 + 2 支 hook script + CI + 157 test，但知識只散在 chronological 的 `docs/progress-ipynb-to-py.md`，沒有一份可當 reference 的入口文件。M20 補 `tools/README.md`（工具一覽表、常用指令、hook 安裝、CI 對應、測試清單、失敗修法），並依 M18 / M19 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeParityTests`（6 個 test，純 stdlib），把 README「## Tools」表格列出的工具集合鎖死 == 實際 `tools/*.py` + 2 支 hook script，文件再也不能 silently 與實際工具樹漂移。不動 production code。
 - **M21** — README「## 測試」table ↔ `tools/tests/test_*.py` parity guard：M20 的 `ReadmeParityTests` 只鎖了「## Tools」表格（production 工具 + hook）對 `tools/*.py`，但同一份 README 的「## 測試」表格（列出 6 支 test 檔）完全沒被守——新增 / 刪除 / rename 一支 test module，文件就 silently 腐爛。M21 依 M20 precedent 把 `_tools_section()` 抽成通用 `_section(header)`，補 `tools/tests/test_readme.py` 的 `ReadmeTestTableParityTests`（4 個 test，純 stdlib），把「## 測試」表格列出的 test 集合鎖死 == 實際 `glob('tools/tests/test_*.py')`。關掉 README 最後一張未被守的表。不動 production code。
 - **M22** — README「## CI 對應」numbered list ↔ CI workflow parity guard：M18 把 `check_all.build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 的 run-steps 用 `WorkflowParityTests` 互鎖，但同一條 CI step 序列在 `tools/README.md`「## CI 對應」段還有**第三份手寫副本**（4 步 numbered list，內嵌 backtick 指令）完全沒被守——改了 workflow / `check_all` 的步驟卻忘了改 README，這份「文件版 CI 流程」就 silently 腐爛。M22 依 M18 / M20 / M21 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiParityTests`（6 個 test，純 stdlib），解析 README CI 段的 numbered backtick 指令，**復用** M18 的 `_step_signature` / `_workflow_run_commands`（同一套 normalization）把它與 workflow run-steps 做 ordered 比對。透過 M18 的 workflow == build_steps 互鎖，傳遞性保證 README == workflow == `check_all`。關掉 README 最後一份未被守的 CI step 清單。不動 production code。
+- **M23** — `pre-push` git hook：把 hook story 從單向補成雙向。M5/M11/M12 的 `pre-commit` 只負責「stage `.ipynb` 時重生 `.py`」，但若有人 `git commit -n` 繞過 hook、或根本沒裝 hook，drifted / 無法 compile 的 `.py` 還是能被 push 上去，要等 CI 紅才發現。M23 新增 `tools/hooks/pre-push` 跑 `check_all.py --skip-tests`（CI step 2-4 的 artifact 檢查：strict pre-scan + sync + converted），不同步就擋下 push；擴 `install.sh` 一次裝兩個 hook（沿用 idempotent + backup 邏輯）；把新 hook 加進 `test_readme._HOOK_PATHS` 讓 README parity guard 雙向守住；補 4 個 `PrePushHookTests` + 翻新 3 個 `InstallShTests` 到 `tools/tests/test_pre_commit_hook.py`。不動 converter / 三支 checker / CI workflow。
 
 ## 進度日誌
 
@@ -756,3 +757,40 @@ python3 -m unittest tools.tests.test_readme.ReadmeCiParityTests -v
 - 至此 CI step 序列的**三份副本全部互鎖**：workflow yaml（M18 對 build_steps）+ `check_all.build_steps()`（M18 對 workflow）+ README「## CI 對應」（M22 對 workflow）。改 CI 流程必須三處同步，任一漏改都有 test 會紅
 - `ReadmeCiParityTests` 跨 test 模組 import `test_check_all` 的 helper；若日後把 `_step_signature` / `_workflow_run_commands` 改名或移走，test_readme 的 import 會先 ImportError——這是預期的耦合訊號（兩個 parity guard 本就該共用同一把尺），不是 bug
 - `_CI_STEP_RE` 只認 numbered list（`N. `）+ 行首 backtick 指令；若日後 README 改用 bullet list 或別種步驟格式，`test_ci_section_shape` 會先紅提醒改 parser
+
+### M23 — `pre-push` git hook 把 CI artifact 檢查前移到 push 前
+- 為什麼補：M5/M11/M12 建立的 `pre-commit` hook 只做「stage `.ipynb` 時重生對應 `.py` 並一起 commit」這個**前向**動作。但 hook 是 opt-in，且 `git commit -n` / `--no-verify` 可繞過——一旦 `.py` 與 `.ipynb` drift（或 `.py` 無法 compile、夾帶 magic leak），目前唯一的攔截點是 CI，要等 push 後 workflow 跑紅才發現。本地少了「push 前最後一道把關」。M23 補上對稱的另一半：push 前在本地重現 CI 的 artifact 檢查
+- 新增 `tools/hooks/pre-push`（bash）：
+  - `cd` 到 repo root 後跑 `python3 tools/check_all.py --skip-tests`
+  - 失敗印一行「fix the above before pushing (or bypass with: git push --no-verify)」到 stderr 並 `exit 1`，git 因此中止 push
+  - **為什麼 `--skip-tests`**：CI step 1（`unittest discover -s tools/tests`）驗的是 toolchain 本身、不是你要 push 的 notebook；它需要完整 `tools/tests/` 樹、且會在每次 push 無關變更時都重跑（甚至遞迴起 subprocess git repo 的 hook 測試）。pre-push 只跑 step 2-4（strict pre-scan + sync + converted）——正好對應「push 上去的 `.py` artifact 是否乾淨」這個本地該擋的風險面；toolchain 單元測試仍由 CI 跑
+  - **為什麼不加 `--quiet`**：失敗時 dev 需要看到 `DRIFT: <nb>` 是哪個檔，quiet 會抑制 per-file 行（見 M14），對 blocking gate 是反效果。所以保留 verbose
+- 擴 `tools/hooks/install.sh`：原本只 symlink `pre-commit`，改成 `for hook in pre-commit pre-push` 迴圈一次裝兩個，沿用既有的 chmod +x / 非 symlink backup / idempotent `ln -sf` 邏輯。手動安裝指令在 README 也補上 `pre-push` 那條
+- 鎖進 parity guard：把 `tools/hooks/pre-push` 加進 `test_readme._HOOK_PATHS`，於是 M20 的 `ReadmeParityTests` 雙向守住——README「## Tools」表沒列 pre-push（或列了但檔案不存在）就紅。README「## Tools」表新增一列、「## 安裝 git hooks」段（原「## 安裝 pre-commit hook」改名）說明兩個 hook + `--skip-tests` 理由
+- 測試（`tools/tests/test_pre_commit_hook.py`）：
+  - 翻新 `InstallShTests` 3 個 case 改為驗**兩個** symlink（`test_fresh_install_creates_both_symlinks_to_relative_targets`）、兩個 hook 都 idempotent 無 backup、pre-existing 非 symlink 的兩個 hook 都被 backup；setUp 多 copy `pre-push`（不 copy 的話 `install.sh` 在 `chmod +x` 階段就會 `set -e` 噴錯）
+  - 新增 `PrePushHookTests`（4 case）：每 test 起隔離 git repo，copy converter + 兩支 checker + `check_all.py` + `pre-push`（**刻意不 copy `tools/tests/` 樹**——這正是 `--skip-tests` 要避免的遞迴），symlink 安裝 hook，用 `subprocess.run([hook, 'origin', url], input=<ref lines>)` 照 git 真實呼叫法觸發：
+    - `test_pass_when_artifacts_in_sync` — 用 converter 生 byte-for-byte 同步的 `.py` → rc=0
+    - `test_block_when_py_drifted` — append 一行進 `.py`（模擬繞過 pre-commit）→ rc≠0
+    - `test_block_when_py_missing` — 只有 `.ipynb` 沒 `.py` → rc≠0
+    - `test_block_when_notebook_is_malformed` — 壞 JSON 觸發 strict pre-scan → rc≠0
+- 不動的東西：converter / 三支 checker / `check_all.py` / CI workflow 全部沒改。pre-push 純粹是 opt-in 的本地 gate，復用既有工具
+- 已知 edge（繼承自 toolchain）：repo 內**完全沒有 `.ipynb`** 時，strict pre-scan 與 sync checker 都回 rc=1（M14/M16 lock 的「empty tree → rc=1」），所以 pre-push 會擋下 push。TQuant-Lab 永遠有 77 個 notebook 不會踩到；因此沒為「零 notebook 必過」寫 test（不想 enshrine 這個邊角行為）。若日後要在無 notebook 的 repo 重用此 hook，需讓 checker 對 empty tree 放行
+- 本地驗證：
+  - `python3 tools/tests/test_pre_commit_hook.py -v` → `Ran 17 tests OK`（HookBehaviour 10 + InstallSh 3 + PrePush 4）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 171 tests OK`（M22 167 + M23 4）
+  - `python3 tools/tests/test_readme.py` → `Ran 16 tests OK`（pre-push 進 `_HOOK_PATHS` 後仍綠）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+  - End-to-end smoke（真 repo）：同步狀態 `tools/hooks/pre-push origin <url>` → rc=0 / 3 steps pass；故意 append 一行進 `Aroon.py` → rc=1 + `DRIFT: Aroon.ipynb`；還原後乾淨
+
+#### 用法
+```bash
+# 裝 hook（pre-commit + pre-push 一起）
+tools/hooks/install.sh
+
+# 想跳過 pre-push gate（極少數情況）
+git push --no-verify
+
+# 只跑 M23 新增的 class
+python3 -m unittest tools.tests.test_pre_commit_hook.PrePushHookTests -v
+```

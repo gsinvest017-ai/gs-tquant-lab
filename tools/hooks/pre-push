@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Block a push when the .ipynb -> .py artifacts are out of sync / broken, so
+# drift is caught locally instead of failing CI after the push lands.
+#
+# Install via:
+#   tools/hooks/install.sh
+# or manually:
+#   ln -sf ../../tools/hooks/pre-push .git/hooks/pre-push
+#
+# Mirrors CI steps 2-4 (strict pre-scan + sync check + converted check) by
+# running check_all.py --skip-tests. The unittest step (CI step 1) is
+# intentionally skipped here: it validates the toolchain itself (not what you
+# are pushing), needs the full tools/tests tree, and would re-run on every push
+# of unrelated work. CI still runs it. Bypass this hook with: git push --no-verify
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+if ! python3 tools/check_all.py --skip-tests; then
+    echo "[ipynb->py pre-push] artifact checks failed -- fix the above before pushing (or bypass with: git push --no-verify)" >&2
+    exit 1
+fi
