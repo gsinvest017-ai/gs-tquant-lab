@@ -13,6 +13,8 @@ must equal the real test set.
   - ReadmeParityTests          -- "## Tools" table  vs  tools/*.py + hooks (M20)
   - ReadmeTestTableParityTests -- "## 測試" table   vs  tools/tests/test_*.py (M21)
   - ReadmeCiParityTests        -- "## CI 對應" list  vs  CI workflow run-steps (M22)
+  - InstallParityTests         -- install.sh loop + README `ln -sf` block
+                                  vs  tools/hooks/ scripts on disk (M24)
 
 The yaml/gitattributes guards parse a sibling config file; here we parse the
 README's tables with deliberately narrow regexes and assert each table's shape
@@ -140,6 +142,58 @@ def _documented_ci_commands() -> list[str]:
         if m:
             cmds.append(m.group(1))
     return cmds
+
+
+INSTALL_SH = TOOLS / 'hooks' / 'install.sh'
+HOOKS_DIR = TOOLS / 'hooks'
+
+# `for hook in pre-commit pre-push; do` in install.sh
+_INSTALL_LOOP_RE = re.compile(r'^\s*for\s+hook\s+in\s+(.+?)\s*;\s*do\s*$')
+# `ln -sf ../../tools/hooks/<hook> .git/hooks/<hook>` in the README manual block;
+# capture both the symlink source basename and the destination basename.
+_LN_SF_RE = re.compile(r'ln\s+-sf\s+\S*tools/hooks/(\S+)\s+\S*\.git/hooks/(\S+)')
+
+
+def _install_sh_loop_hooks() -> set[str]:
+    """Hook names from install.sh's `for hook in ...; do` loop."""
+    for ln in INSTALL_SH.read_text(encoding='utf-8').splitlines():
+        m = _INSTALL_LOOP_RE.match(ln)
+        if m:
+            return set(m.group(1).split())
+    return set()
+
+
+def _manual_install_lines() -> list[tuple[str, str]]:
+    """(src_basename, dst_basename) pairs from the README manual `ln -sf` lines.
+
+    Scoped to the "## 安裝 git hooks" section so unrelated `ln -sf` examples
+    elsewhere in the README cannot leak in.
+    """
+    pairs: list[tuple[str, str]] = []
+    for ln in _section('安裝 git hooks'):
+        m = _LN_SF_RE.search(ln)
+        if m:
+            pairs.append((m.group(1), m.group(2)))
+    return pairs
+
+
+def _manual_install_hooks() -> set[str]:
+    """Hook names symlinked by the README manual `ln -sf` block."""
+    return {src for src, _dst in _manual_install_lines()}
+
+
+def _disk_installable_hooks() -> set[str]:
+    """Executable hook scripts install.sh installs: every file in tools/hooks/
+    except the installer itself (the source of truth for the hook set)."""
+    return {
+        p.name for p in HOOKS_DIR.iterdir()
+        if p.is_file() and p.name != 'install.sh'
+    }
+
+
+def _disk_all_hook_scripts() -> set[str]:
+    """Every `tools/hooks/...` script on disk (installer included)."""
+    return {f'tools/hooks/{p.name}' for p in HOOKS_DIR.iterdir() if p.is_file()}
 
 
 class ReadmeParityTests(unittest.TestCase):
@@ -323,6 +377,101 @@ class ReadmeCiParityTests(unittest.TestCase):
                         (REPO / tok).exists(),
                         f'README CI list names `{tok}` but it does not exist',
                     )
+
+
+class InstallParityTests(unittest.TestCase):
+    """The git-hook *set* must agree across its four hand-written copies.
+
+    After M23 "which hooks does the toolchain install" is written in four
+    places: the real scripts in tools/hooks/ (source of truth), install.sh's
+    `for hook in ...` loop, the README "## Tools" table (M20-guarded, but via
+    the *hardcoded* _HOOK_PATHS constant), and the README "## 安裝 git hooks"
+    manual `ln -sf` block (until now unguarded). Add a hook and forget the loop
+    or the manual block and it silently rots -- the same "true only by
+    convention" gap M18 / M20 / M21 / M22 each closed by locking the invariant
+    into a test. These pin install.sh's loop and the README manual block to the
+    real hook set on disk, and validate the hardcoded _HOOK_PATHS against disk.
+    """
+
+    def test_install_sh_loop_shape(self):
+        # Guards the narrow parser: install.sh must contain a parseable
+        # `for hook in ...; do` loop. A refactor away from this shape fails
+        # loudly so the parser gets updated rather than reading zero hooks.
+        self.assertTrue(
+            _install_sh_loop_hooks(),
+            'install.sh has no `for hook in ...; do` loop; update _INSTALL_LOOP_RE',
+        )
+
+    def test_manual_install_block_shape(self):
+        # Guards the narrow parser: the 安裝 section must have at least one
+        # `ln -sf .../tools/hooks/<hook> .../.git/hooks/<hook>` line.
+        self.assertTrue(
+            _manual_install_hooks(),
+            'README "## 安裝 git hooks" has no `ln -sf` hook lines; '
+            'update _LN_SF_RE',
+        )
+
+    def test_install_sh_hooks_match_disk(self):
+        # Core drift guard: install.sh's loop installs exactly the hook scripts
+        # that exist in tools/hooks/ (installer excluded).
+        loop = _install_sh_loop_hooks()
+        disk = _disk_installable_hooks()
+        self.assertEqual(
+            loop, disk,
+            "install.sh's `for hook in ...` loop drifted from the real "
+            'tools/hooks/ scripts.\n'
+            f'  install.sh loop: {sorted(loop)}\n'
+            f'  on disk:         {sorted(disk)}\n'
+            'Update the loop in tools/hooks/install.sh and the tools/hooks/ '
+            'tree together.',
+        )
+
+    def test_manual_install_hooks_match_disk(self):
+        # Core drift guard: the README manual `ln -sf` block symlinks exactly
+        # the hook scripts that exist on disk.
+        manual = _manual_install_hooks()
+        disk = _disk_installable_hooks()
+        self.assertEqual(
+            manual, disk,
+            'README "## 安裝 git hooks" manual `ln -sf` block drifted from the '
+            'real tools/hooks/ scripts.\n'
+            f'  README manual: {sorted(manual)}\n'
+            f'  on disk:       {sorted(disk)}\n'
+            'Update the manual install block in tools/README.md and the '
+            'tools/hooks/ tree together.',
+        )
+
+    def test_install_sh_and_manual_block_agree(self):
+        # Transitive sanity: the two hand-written copies equal each other
+        # directly (each is also pinned to disk above; this gives a clearer
+        # message when only those two -- not disk -- diverge).
+        self.assertEqual(
+            _install_sh_loop_hooks(), _manual_install_hooks(),
+            "install.sh's loop and the README manual `ln -sf` block list "
+            'different hook sets.',
+        )
+
+    def test_manual_install_symlink_src_equals_dst(self):
+        # Each manual line must symlink tools/hooks/<h> to .git/hooks/<h> with a
+        # matching basename -- a mismatched dst would install a broken hook.
+        for src, dst in _manual_install_lines():
+            self.assertEqual(
+                src, dst,
+                f'README manual `ln -sf` maps tools/hooks/{src} to '
+                f'.git/hooks/{dst}; basenames must match',
+            )
+
+    def test_hook_paths_constant_matches_disk(self):
+        # Validate M20's hardcoded _HOOK_PATHS against disk so the "## Tools"
+        # table guard (test_hook_scripts_documented) can't be silently bypassed
+        # by a hook that exists but was never added to the constant.
+        self.assertEqual(
+            _HOOK_PATHS, _disk_all_hook_scripts(),
+            'test_readme._HOOK_PATHS drifted from the real tools/hooks/ tree.\n'
+            f'  constant: {sorted(_HOOK_PATHS)}\n'
+            f'  on disk:  {sorted(_disk_all_hook_scripts())}\n'
+            'Update _HOOK_PATHS and the README "## Tools" table together.',
+        )
 
 
 if __name__ == '__main__':

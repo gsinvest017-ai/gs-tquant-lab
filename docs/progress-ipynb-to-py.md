@@ -28,6 +28,7 @@
 - **M21** — README「## 測試」table ↔ `tools/tests/test_*.py` parity guard：M20 的 `ReadmeParityTests` 只鎖了「## Tools」表格（production 工具 + hook）對 `tools/*.py`，但同一份 README 的「## 測試」表格（列出 6 支 test 檔）完全沒被守——新增 / 刪除 / rename 一支 test module，文件就 silently 腐爛。M21 依 M20 precedent 把 `_tools_section()` 抽成通用 `_section(header)`，補 `tools/tests/test_readme.py` 的 `ReadmeTestTableParityTests`（4 個 test，純 stdlib），把「## 測試」表格列出的 test 集合鎖死 == 實際 `glob('tools/tests/test_*.py')`。關掉 README 最後一張未被守的表。不動 production code。
 - **M22** — README「## CI 對應」numbered list ↔ CI workflow parity guard：M18 把 `check_all.build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 的 run-steps 用 `WorkflowParityTests` 互鎖，但同一條 CI step 序列在 `tools/README.md`「## CI 對應」段還有**第三份手寫副本**（4 步 numbered list，內嵌 backtick 指令）完全沒被守——改了 workflow / `check_all` 的步驟卻忘了改 README，這份「文件版 CI 流程」就 silently 腐爛。M22 依 M18 / M20 / M21 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiParityTests`（6 個 test，純 stdlib），解析 README CI 段的 numbered backtick 指令，**復用** M18 的 `_step_signature` / `_workflow_run_commands`（同一套 normalization）把它與 workflow run-steps 做 ordered 比對。透過 M18 的 workflow == build_steps 互鎖，傳遞性保證 README == workflow == `check_all`。關掉 README 最後一份未被守的 CI step 清單。不動 production code。
 - **M23** — `pre-push` git hook：把 hook story 從單向補成雙向。M5/M11/M12 的 `pre-commit` 只負責「stage `.ipynb` 時重生 `.py`」，但若有人 `git commit -n` 繞過 hook、或根本沒裝 hook，drifted / 無法 compile 的 `.py` 還是能被 push 上去，要等 CI 紅才發現。M23 新增 `tools/hooks/pre-push` 跑 `check_all.py --skip-tests`（CI step 2-4 的 artifact 檢查：strict pre-scan + sync + converted），不同步就擋下 push；擴 `install.sh` 一次裝兩個 hook（沿用 idempotent + backup 邏輯）；把新 hook 加進 `test_readme._HOOK_PATHS` 讓 README parity guard 雙向守住；補 4 個 `PrePushHookTests` + 翻新 3 個 `InstallShTests` 到 `tools/tests/test_pre_commit_hook.py`。不動 converter / 三支 checker / CI workflow。
+- **M24** — hook-set parity guard：`install.sh` 迴圈 ↔ README 手動安裝 `ln -sf` 區塊 ↔ 實際 `tools/hooks/` 腳本集。M23 之後「toolchain 要裝哪些 git hook」這份清單同時手寫在四個地方：(1) `tools/hooks/` 下的實際腳本（真理來源）、(2) `install.sh` 的 `for hook in pre-commit pre-push` 迴圈、(3) README「## Tools」表（M20 守，但靠**硬編**的 `_HOOK_PATHS`）、(4) README「## 安裝 git hooks」段的手動 `ln -sf` 指令（**完全沒守**）。新增 hook 卻漏改 (2) 或 (4) 就 silently 腐爛。M24 依 M18 / M20 / M21 / M22 precedent 補 `tools/tests/test_readme.py` 的 `InstallParityTests`（6 個 test，純 stdlib）：純 regex 解析 `install.sh` 迴圈與 README 手動 `ln -sf` 區塊，兩邊與「`tools/hooks/` 下除 `install.sh` 外的所有腳本」這個磁碟真理鎖死；並把硬編的 `_HOOK_PATHS` 常數對磁碟驗證。關掉 hook 安裝清單最後兩份未被守的副本。不動 production code。
 
 ## 進度日誌
 
@@ -794,3 +795,45 @@ git push --no-verify
 # 只跑 M23 新增的 class
 python3 -m unittest tools.tests.test_pre_commit_hook.PrePushHookTests -v
 ```
+
+### M24 — hook-set parity guard：install.sh 迴圈 ↔ README 手動 `ln -sf` 區塊 ↔ `tools/hooks/` 磁碟
+- 為什麼補：M23 之後「toolchain 要裝哪些 git hook」這份清單同時手寫在**四個**地方，彼此沒有任何強制同步：
+  1. `tools/hooks/` 下的實際腳本（`pre-commit` / `pre-push`，**真理來源**）
+  2. `install.sh` 的 `for hook in pre-commit pre-push; do` 迴圈
+  3. README「## Tools」表（M20 的 `ReadmeParityTests.test_hook_scripts_documented` 守，但它比對的是**硬編**在 test 裡的 `_HOOK_PATHS` 常數）
+  4. README「## 安裝 git hooks」段的手動 `ln -sf ../../tools/hooks/<h> .git/hooks/<h>` 指令（**完全沒守**）
+  - 新增第三個 hook（例如 `commit-msg`）卻漏改 (2) 或 (4)，使用者照 README 手動安裝就會少裝一個 hook、或 `install.sh` 裝的與文件講的不一致，而沒有任何 test 會紅。這正是 M9（orphan）/ M18（CI parity）/ M20-M22（README 表格 / CI 清單）反覆關掉的「只靠慣例成立」缺口
+- 解法：在 `tools/tests/test_readme.py` 新增 `InstallParityTests`（7 個 test，純 stdlib），把「磁碟真理」定義為 `tools/hooks/` 下除 `install.sh` 外的所有檔（`_disk_installable_hooks()`），兩份手寫副本都對它鎖死：
+  - `_INSTALL_LOOP_RE = ^\s*for\s+hook\s+in\s+(.+?)\s*;\s*do\s*$` 解析 install.sh 迴圈 → hook 名集合
+  - `_LN_SF_RE = ln\s+-sf\s+\S*tools/hooks/(\S+)\s+\S*\.git/hooks/(\S+)` 解析 README 手動區塊，**同時捕獲 source 與 dest basename**（dest 無路徑前綴，regex 對 `.git/hooks/` 不強制前導斜線）；`_manual_install_lines()` 限定只掃「## 安裝 git hooks」段，避免 README 他處的 `ln -sf` 範例洩入
+- 7 個 test：
+  - `test_install_sh_loop_shape` / `test_manual_install_block_shape` — narrow parser 守門（同 M20-M22 的 `*_shape`，reformat 走樣先紅提醒改 regex）
+  - `test_install_sh_hooks_match_disk` — **核心 guard**：install.sh 迴圈集合 == 磁碟可安裝 hook 集合
+  - `test_manual_install_hooks_match_disk` — **核心 guard**：README 手動 `ln -sf` 集合 == 磁碟集合
+  - `test_install_sh_and_manual_block_agree` — 兩份手寫副本直接互等（各自已對磁碟鎖；此條讓「只有這兩份彼此分歧」時錯誤訊息更清楚）
+  - `test_manual_install_symlink_src_equals_dst` — 每條 `ln -sf` 的 `tools/hooks/<h>` 與 `.git/hooks/<h>` basename 必須相同（dest 打錯會裝出壞 symlink）
+  - `test_hook_paths_constant_matches_disk` — 把 M20 **硬編**的 `_HOOK_PATHS`（含 `install.sh`）對 `tools/hooks/` 全部腳本驗證；這樣「## Tools」表的 hook guard 不會被「有 hook 但沒加進常數」silently 繞過
+- 為什麼放 test 而非 production：同 M18-M22——讓 production 工具 runtime 去 parse 自己的 README / install.sh 是不必要耦合；安裝清單跨檔一致性是 test-only 的 cross-file 不變量
+- 不需動 production code：`install.sh` / README / 兩支 hook 既有內容一寫就綠。純測試新增
+- 不需動 CI workflow：`.github/workflows/ipynb-py-sync.yml` 已跑 `python3 -m unittest discover -s tools/tests`，7 個新 test 自動 pick up
+- 負向驗證（確認三條核心 guard 真的會咬，跑完還原）：
+  - 在 install.sh 迴圈塞 `commit-msg` → `test_install_sh_hooks_match_disk` FAIL
+  - 刪掉 README 的 `pre-push` `ln -sf` 行 → `test_manual_install_hooks_match_disk` FAIL
+  - 從 `_HOOK_PATHS` 拿掉 `pre-push` → `test_hook_paths_constant_matches_disk` FAIL
+- 本地驗證：
+  - `python3 tools/tests/test_readme.py` → `Ran 23 tests OK`（M20 6 + M21 4 + M22 6 + M23 1（hook 進 `_HOOK_PATHS`）+ M24 7）
+  - dotted（`-m unittest tools.tests.test_readme.InstallParityTests`）與 direct-file 兩模式皆 OK（沿用 M22 的 HERE-on-sys.path import robustness）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 178 tests OK`（M23 171 + M24 7）
+  - `python3 tools/check_all.py --skip-tests --quiet` → 3 steps 全 PASS、exit 0
+  - pre-push hook 真 repo smoke：`bash tools/hooks/pre-push origin file://$(pwd)` → rc=0、3 steps pass
+
+#### 用法
+```bash
+# 只跑 M24 新增的 class
+python3 -m unittest tools.tests.test_readme.InstallParityTests
+python3 -m unittest tools.tests.test_readme.InstallParityTests -v
+```
+
+#### 副作用 / 注意
+- 至此「toolchain 安裝哪些 hook」的四份副本全部互鎖：磁碟（真理）↔ install.sh 迴圈（M24）↔ README 手動區塊（M24）↔ README「## Tools」表（M20 經 `_HOOK_PATHS`，而 `_HOOK_PATHS` 本身又經 M24 對磁碟驗證）。新增 / 刪除 hook 必須四處同步
+- `_disk_installable_hooks()` 把「`tools/hooks/` 下除 `install.sh` 外的檔」當可安裝 hook；若日後在該目錄放非 hook 的輔助檔（如共用 lib），需調整此 helper 的排除清單，否則 `test_install_sh_hooks_match_disk` 會把它當成該被安裝的 hook
