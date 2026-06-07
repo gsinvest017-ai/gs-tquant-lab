@@ -106,6 +106,7 @@ python3 -m unittest tools.tests.test_check_all.WorkflowParityTests
 | `tools/tests/test_pre_commit_hook.py` | hooks（pre-commit / pre-push）+ `install.sh`（每 test 起自有 temp git repo 跑真實 hook） |
 | `tools/tests/test_check_all.py` | aggregate runner + CI workflow parity guard |
 | `tools/tests/test_readme.py` | 本 README 的 tool 清單 ↔ 實際 `tools/` 檔案 parity guard |
+| `tools/tests/test_discovery_parity.py` | 三支工具的 notebook-discovery 行為 parity（converter / sync / validator 枚舉同一組 `.ipynb`） |
 
 ## 失敗時怎麼修
 

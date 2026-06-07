@@ -29,6 +29,7 @@
 - **M22** — README「## CI 對應」numbered list ↔ CI workflow parity guard：M18 把 `check_all.build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 的 run-steps 用 `WorkflowParityTests` 互鎖，但同一條 CI step 序列在 `tools/README.md`「## CI 對應」段還有**第三份手寫副本**（4 步 numbered list，內嵌 backtick 指令）完全沒被守——改了 workflow / `check_all` 的步驟卻忘了改 README，這份「文件版 CI 流程」就 silently 腐爛。M22 依 M18 / M20 / M21 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiParityTests`（6 個 test，純 stdlib），解析 README CI 段的 numbered backtick 指令，**復用** M18 的 `_step_signature` / `_workflow_run_commands`（同一套 normalization）把它與 workflow run-steps 做 ordered 比對。透過 M18 的 workflow == build_steps 互鎖，傳遞性保證 README == workflow == `check_all`。關掉 README 最後一份未被守的 CI step 清單。不動 production code。
 - **M23** — `pre-push` git hook：把 hook story 從單向補成雙向。M5/M11/M12 的 `pre-commit` 只負責「stage `.ipynb` 時重生 `.py`」，但若有人 `git commit -n` 繞過 hook、或根本沒裝 hook，drifted / 無法 compile 的 `.py` 還是能被 push 上去，要等 CI 紅才發現。M23 新增 `tools/hooks/pre-push` 跑 `check_all.py --skip-tests`（CI step 2-4 的 artifact 檢查：strict pre-scan + sync + converted），不同步就擋下 push；擴 `install.sh` 一次裝兩個 hook（沿用 idempotent + backup 邏輯）；把新 hook 加進 `test_readme._HOOK_PATHS` 讓 README parity guard 雙向守住；補 4 個 `PrePushHookTests` + 翻新 3 個 `InstallShTests` 到 `tools/tests/test_pre_commit_hook.py`。不動 converter / 三支 checker / CI workflow。
 - **M24** — hook-set parity guard：`install.sh` 迴圈 ↔ README 手動安裝 `ln -sf` 區塊 ↔ 實際 `tools/hooks/` 腳本集。M23 之後「toolchain 要裝哪些 git hook」這份清單同時手寫在四個地方：(1) `tools/hooks/` 下的實際腳本（真理來源）、(2) `install.sh` 的 `for hook in pre-commit pre-push` 迴圈、(3) README「## Tools」表（M20 守，但靠**硬編**的 `_HOOK_PATHS`）、(4) README「## 安裝 git hooks」段的手動 `ln -sf` 指令（**完全沒守**）。新增 hook 卻漏改 (2) 或 (4) 就 silently 腐爛。M24 依 M18 / M20 / M21 / M22 precedent 補 `tools/tests/test_readme.py` 的 `InstallParityTests`（6 個 test，純 stdlib）：純 regex 解析 `install.sh` 迴圈與 README 手動 `ln -sf` 區塊，兩邊與「`tools/hooks/` 下除 `install.sh` 外的所有腳本」這個磁碟真理鎖死；並把硬編的 `_HOOK_PATHS` 常數對磁碟驗證。關掉 hook 安裝清單最後兩份未被守的副本。不動 production code。
+- **M25** — notebook-discovery 行為 parity guard：toolchain 有**三支工具各自獨立**重寫了「`.ipynb` 探索 + `.ipynb_checkpoints` 過濾」這段 walk——converter 的 root-walk（`ipynb_to_py.main`，決定哪些 notebook 會重生 `.py`）、sync checker 的 `_pairs`（決定哪些做 byte-for-byte 比對）、validator 的 `_paired_py_files`（決定哪些生成 `.py` 跑 compile + magic-leak）。三者目前邏輯相同但沒有任何東西強制它們枚舉**同一組** notebook——日後在某一支的 walk 加 skip dir / 動 checkpoint filter 卻漏改另兩支，coverage 就 silently 漂移（notebook 被轉但沒被 sync-check、或被 sync-check 但沒被 compile-validate），而 CI 抓不到（每個 step 只看自己那一片）。M25 依 M9（orphan）/ M18（CI parity）/ M20-M24（README/install parity）precedent，補 `tools/tests/test_discovery_parity.py` 的 `NotebookDiscoveryParityTests`（8 個 test，純 stdlib），但用**行為 parity** 而非 text parsing：在同一棵 fixture tree（root nb + nested nb + root-level/nested `.ipynb_checkpoints/` notebook）上跑三支真實 discovery path，斷言枚舉出的 notebook 集合三方相同。converter 端透過 `--dry-run` 輸出取得真實 walk 結果（不在 test 內複寫 walk 邏輯）。不動 production code。
 
 ## 進度日誌
 
@@ -837,3 +838,40 @@ python3 -m unittest tools.tests.test_readme.InstallParityTests -v
 #### 副作用 / 注意
 - 至此「toolchain 安裝哪些 hook」的四份副本全部互鎖：磁碟（真理）↔ install.sh 迴圈（M24）↔ README 手動區塊（M24）↔ README「## Tools」表（M20 經 `_HOOK_PATHS`，而 `_HOOK_PATHS` 本身又經 M24 對磁碟驗證）。新增 / 刪除 hook 必須四處同步
 - `_disk_installable_hooks()` 把「`tools/hooks/` 下除 `install.sh` 外的檔」當可安裝 hook；若日後在該目錄放非 hook 的輔助檔（如共用 lib），需調整此 helper 的排除清單，否則 `test_install_sh_hooks_match_disk` 會把它當成該被安裝的 hook
+
+### M25 — notebook-discovery 行為 parity guard：三支工具枚舉同一組 `.ipynb`
+- 為什麼補：toolchain 有三支工具各自**獨立**重寫了「`.ipynb` 探索 + `.ipynb_checkpoints` 過濾」這段 walk，彼此沒有任何強制同步：
+  1. `ipynb_to_py.main` 的 root-walk：`sorted(p for p in base.rglob('*.ipynb') if '.ipynb_checkpoints' not in p.parts)`（決定哪些 notebook 會重生 `.py`）
+  2. `check_ipynb_py_sync._pairs`：`root.rglob('*.ipynb')` 過濾 `'.ipynb_checkpoints' in nb.parts`（決定哪些做 byte-for-byte sync 比對）
+  3. `check_converted_py._paired_py_files`：同上過濾（決定哪些生成 `.py` 跑 `py_compile` + magic-leak）
+  - 三者目前邏輯一致，但若日後在某一支的 walk 加 skip dir / 改 checkpoint filter（例如改成同時略過 `.git` / `__pycache__`，像 `_SKIP_DIR_PARTS` 那樣）卻漏改另兩支，coverage 就 silently 漂移：notebook 可能被轉了卻沒被 sync-check、或被 sync-check 了卻沒被 compile-validate。CI 抓不到，因為每個 step 只看自己那一片 notebook，無法察覺三片之間的缺口。這正是 M9（orphan）/ M18（CI parity）/ M20-M24（README/install parity）反覆關掉的「只靠慣例成立」缺口，只是這次的不變量在**行為層**而非文字層
+- 解法：新增 `tools/tests/test_discovery_parity.py` 的 `NotebookDiscoveryParityTests`（8 個 test，純 stdlib），用**行為 parity** 而非 text/regex parsing：
+  - fixture tree（`tempfile.TemporaryDirectory`）：3 個真 notebook（`A.ipynb`、`sub/B.ipynb`、`sub/deep/C.ipynb`）+ 2 個必須被排除的 checkpoint notebook（root-level `.ipynb_checkpoints/A-checkpoint.ipynb`——正是 M11 修過的 root-level filter bug 點——與 nested `sub/.ipynb_checkpoints/B-checkpoint.ipynb`）
+  - 三支 discovery 各包一個 helper，全部 normalize 成 root-relative posix 字串集合：
+    - `_converter_discovers`：跑真實 `ipynb_to_py.main(['--dry-run', root])`、parse `[dry] <rel> -> ...` 行取得 walk 結果——**刻意不在 test 內複寫 walk**，否則 parity guard 形同虛設（測的會是 test 自己的複本而非 production walk）。dry-run 在 M16 後仍會 `convert_to_str` 驗 parseability，所以 fixture notebook 用最小但合法的 nbformat JSON
+    - `_pairs_discovers` / `_validator_discovers`：直接 import `_pairs` / `_paired_py_files`
+  - 8 個 case：三支各自 == expected 3 檔（3）、**核心** `test_all_three_discover_identical_set`（converter==pairs==validator）（1）、root-level + nested checkpoint 被三方共同排除（2）、negative control `test_fixture_actually_contains_checkpoints`（raw `rglob` 看到 5 個 `.ipynb` 但三支 discovery 都只看到 3，證明 filter 真的被 exercise，不是 vacuous pass）（1）、empty tree 三方都回空集合（1）
+- 設計細節：
+  - converter 的 walk 嵌在 `main()` 內、不是獨立 function；不為了測它而抽 helper（避免動 production code），改走 `--dry-run` 輸出 parse——這條 dry-run 行為已被 M13/M16 鎖過，穩定可依賴
+  - `_DRY_RE = ^\[dry\] (.+?) -> ` narrow 解析；fixture 的最小 notebook `{"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}` 確保 dry-run parseability 檢查不會誤判失敗
+  - negative control 是這類 parity test 的關鍵：沒有它，若 fixture 哪天少放了 checkpoint，exclusion 斷言會 trivially 通過而沒人發現
+- 為什麼放 test 而非 production：同 M18-M24——讓三支工具 runtime 去互相比對彼此的 discovery 是不必要耦合；「三支 walk 枚舉同一組」是 test-only 的 cross-tool 行為不變量。也刻意**不**把三份 walk 重構成單一 shared function（那會引入跨工具 import 耦合 + byte-for-byte regen 風險），與 M19「guard not consolidate」的取捨一致
+- 不需動 production code：converter / sync checker / validator / hook / CI workflow 全部沒改。純測試 + README test-table 一列
+- README 連動：新增 `test_*.py` 觸發 M21 的 `ReadmeTestTableParityTests.test_all_test_files_documented`，故在 `tools/README.md`「## 測試」表補一列 `tools/tests/test_discovery_parity.py`——這正是 M21 guard 設計來捕捉的情境（新測試檔必須同步進文件），順帶實證了該 guard 仍在運作
+- 負向驗證（確認核心 guard 真的會咬，跑完用 backup 還原成 byte-identical）：把 `check_converted_py._paired_py_files` 的 `'.ipynb_checkpoints' in nb.parts` 過濾改成 `if False`（模擬「validator 漏改 filter」）→ `NotebookDiscoveryParityTests` 4 個 test FAIL，錯誤訊息直指 validator 多枚舉了 2 個 checkpoint notebook；還原後 8/8 OK
+- 本地驗證：
+  - `python3 tools/tests/test_discovery_parity.py -v` → `Ran 8 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 186 tests OK`（M24 178 + M25 8）
+  - `python3 tools/tests/test_readme.py` → `Ran 23 tests OK`（test-table 補列後仍綠）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M25 新增的 class
+python3 tools/tests/test_discovery_parity.py -v
+python3 -m unittest tools.tests.test_discovery_parity.NotebookDiscoveryParityTests
+```
+
+#### 副作用 / 注意
+- 若日後想消除這份 discovery 重複（把三支 walk 收斂成一支 shared helper），M25 的 parity test 仍有效：它斷言的是「三個 public discovery 進入點枚舉同一組」，不管底層是三份複本還是一份共用實作都成立，可當重構的安全網
+- converter 端依賴 `--dry-run` 輸出格式（`[dry] <rel> -> <rel_py>`）；若日後改該行格式，`_DRY_RE` 會解析不到、三支 discovery 比對時 converter 集合變空而 FAIL，提醒同步更新 parser
