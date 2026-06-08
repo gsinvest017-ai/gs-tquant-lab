@@ -8,6 +8,10 @@ check). These tests pin:
   - main()         -- exit code, progress/summary output (injected runner)
   - CI parity      -- the workflow yaml's run-steps match build_steps() (the
     drift guard for M17's "local == CI" promise; see WorkflowParityTests)
+  - docstring parity -- check_all.py's own module docstring lists the 4 CI
+    steps a *fourth* time (after the workflow, build_steps, and the README CI
+    section); DocstringParityTests locks it == build_steps() so the file's
+    self-documentation can't silently rot
   - one real-repo integration smoke (rc=0 against the live tree, --skip-tests
     to avoid re-running the whole suite inside a test)
 
@@ -270,6 +274,93 @@ def _workflow_run_commands() -> list[str]:
         if m:
             cmds.append(m.group(1))
     return cmds
+
+
+def _docstring_step_commands() -> list[str]:
+    """Ordered `python3 ...` commands from the numbered step list in
+    check_all.py's module docstring.
+
+    That docstring restates the CI step sequence a *fourth* time -- a
+    hand-written copy alongside the workflow yaml, build_steps(), and the
+    README "## CI 對應" section. This parser lets DocstringParityTests lock it
+    == build_steps() the same way WorkflowParityTests (M18) locks the workflow
+    yaml and ReadmeCiParityTests (M22) locks the README list. Each step line
+    looks like:
+
+        1. unit tests       python3 -m unittest discover -s tools/tests
+
+    so we grab the trailing `python3 ...` command and ignore the label.
+    """
+    cmds: list[str] = []
+    for line in (check_all.__doc__ or '').splitlines():
+        m = re.match(r'\s*\d+\.\s+.*?(python3\s+\S.*?)\s*$', line)
+        if m:
+            cmds.append(m.group(1).strip())
+    return cmds
+
+
+class DocstringParityTests(unittest.TestCase):
+    """Lock check_all.py's module-docstring step list == build_steps().
+
+    Same precedent as WorkflowParityTests (M18) / ReadmeCiParityTests (M22):
+    a hand-written copy of the CI step sequence that holds only by convention
+    becomes true by test. Reuses _step_signature so the docstring is compared
+    by the same normalized (tool, long_flags) contract as the workflow and
+    build_steps -- transitively closing the loop docstring == build_steps ==
+    workflow == README.
+    """
+
+    def test_docstring_lists_four_numbered_commands(self):
+        # Guards the parser assumption: if someone reformats the docstring out
+        # of the "N. label  python3 ..." shape, fail loudly here rather than
+        # silently parsing zero commands and passing the parity tests vacuously.
+        cmds = _docstring_step_commands()
+        self.assertEqual(
+            len(cmds), 4,
+            f'expected 4 numbered python3 steps in check_all docstring, got {cmds!r}',
+        )
+
+    def test_docstring_step_count_matches_build_steps(self):
+        self.assertEqual(len(_docstring_step_commands()), len(build_steps('.')))
+
+    def test_docstring_signatures_match_build_steps_in_order(self):
+        doc_sigs = [_step_signature(shlex.split(c)) for c in _docstring_step_commands()]
+        build_sigs = [_step_signature(argv) for _, argv in build_steps('.')]
+        self.assertEqual(
+            doc_sigs, build_sigs,
+            "check_all.py's module docstring drifted from build_steps().\n"
+            f'  docstring:  {doc_sigs}\n'
+            f'  build_steps:{build_sigs}\n'
+            'Update the numbered step list in tools/check_all.py docstring to '
+            'match build_steps() (and keep both aligned with the CI workflow).',
+        )
+
+    def test_docstring_tools_in_expected_order(self):
+        tools = [_step_signature(shlex.split(c))[0] for c in _docstring_step_commands()]
+        self.assertEqual(tools, [
+            'unittest',
+            'ipynb_to_py.py',
+            'check_ipynb_py_sync.py',
+            'check_converted_py.py',
+        ])
+
+    def test_docstring_strict_dry_run_gate_present(self):
+        prescan = next(
+            _step_signature(shlex.split(c)) for c in _docstring_step_commands()
+            if 'ipynb_to_py.py' in c
+        )
+        self.assertEqual(prescan[0], 'ipynb_to_py.py')
+        self.assertIn('--strict', prescan[1])
+        self.assertIn('--dry-run', prescan[1])
+
+    def test_docstring_matches_workflow_transitively(self):
+        # docstring == workflow follows from docstring == build_steps (above)
+        # and build_steps == workflow (WorkflowParityTests), but asserting it
+        # directly pins the closed loop and gives a clearer failure if the
+        # docstring is the side that drifted.
+        doc_sigs = [_step_signature(shlex.split(c)) for c in _docstring_step_commands()]
+        wf_sigs = [_step_signature(shlex.split(c)) for c in _workflow_run_commands()]
+        self.assertEqual(doc_sigs, wf_sigs)
 
 
 class WorkflowParityTests(unittest.TestCase):

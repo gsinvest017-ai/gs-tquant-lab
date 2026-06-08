@@ -29,6 +29,7 @@
 - **M22** — README「## CI 對應」numbered list ↔ CI workflow parity guard：M18 把 `check_all.build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 的 run-steps 用 `WorkflowParityTests` 互鎖，但同一條 CI step 序列在 `tools/README.md`「## CI 對應」段還有**第三份手寫副本**（4 步 numbered list，內嵌 backtick 指令）完全沒被守——改了 workflow / `check_all` 的步驟卻忘了改 README，這份「文件版 CI 流程」就 silently 腐爛。M22 依 M18 / M20 / M21 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiParityTests`（6 個 test，純 stdlib），解析 README CI 段的 numbered backtick 指令，**復用** M18 的 `_step_signature` / `_workflow_run_commands`（同一套 normalization）把它與 workflow run-steps 做 ordered 比對。透過 M18 的 workflow == build_steps 互鎖，傳遞性保證 README == workflow == `check_all`。關掉 README 最後一份未被守的 CI step 清單。不動 production code。
 - **M23** — `pre-push` git hook：把 hook story 從單向補成雙向。M5/M11/M12 的 `pre-commit` 只負責「stage `.ipynb` 時重生 `.py`」，但若有人 `git commit -n` 繞過 hook、或根本沒裝 hook，drifted / 無法 compile 的 `.py` 還是能被 push 上去，要等 CI 紅才發現。M23 新增 `tools/hooks/pre-push` 跑 `check_all.py --skip-tests`（CI step 2-4 的 artifact 檢查：strict pre-scan + sync + converted），不同步就擋下 push；擴 `install.sh` 一次裝兩個 hook（沿用 idempotent + backup 邏輯）；把新 hook 加進 `test_readme._HOOK_PATHS` 讓 README parity guard 雙向守住；補 4 個 `PrePushHookTests` + 翻新 3 個 `InstallShTests` 到 `tools/tests/test_pre_commit_hook.py`。不動 converter / 三支 checker / CI workflow。
 - **M24** — hook-set parity guard：`install.sh` 迴圈 ↔ README 手動安裝 `ln -sf` 區塊 ↔ 實際 `tools/hooks/` 腳本集。M23 之後「toolchain 要裝哪些 git hook」這份清單同時手寫在四個地方：(1) `tools/hooks/` 下的實際腳本（真理來源）、(2) `install.sh` 的 `for hook in pre-commit pre-push` 迴圈、(3) README「## Tools」表（M20 守，但靠**硬編**的 `_HOOK_PATHS`）、(4) README「## 安裝 git hooks」段的手動 `ln -sf` 指令（**完全沒守**）。新增 hook 卻漏改 (2) 或 (4) 就 silently 腐爛。M24 依 M18 / M20 / M21 / M22 precedent 補 `tools/tests/test_readme.py` 的 `InstallParityTests`（6 個 test，純 stdlib）：純 regex 解析 `install.sh` 迴圈與 README 手動 `ln -sf` 區塊，兩邊與「`tools/hooks/` 下除 `install.sh` 外的所有腳本」這個磁碟真理鎖死；並把硬編的 `_HOOK_PATHS` 常數對磁碟驗證。關掉 hook 安裝清單最後兩份未被守的副本。不動 production code。
+- **M26** — `check_all.py` 自身 docstring step list ↔ `build_steps()` parity guard：M18 把 `build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 互鎖、M22 把 README「## CI 對應」list 鎖進 workflow，但同一條 CI 4-step 序列在 `tools/check_all.py` 的**模組 docstring**（lines 9-12 的 numbered list）還有**第四份手寫副本**完全沒被守——改了 `build_steps()` 卻忘了改自己檔頭的 docstring，這份「工具自我說明」就 silently 腐爛（讀 source 的人被誤導）。M26 依 M18 / M22 precedent 補 `tools/tests/test_check_all.py` 的 `DocstringParityTests`（6 個 test，純 stdlib），純 regex 解析 docstring 的 numbered `python3` 指令、**復用** M18 的 `_step_signature`（同一套 normalization）與 `build_steps('.')` 做 ordered 比對；並直接斷言 docstring == workflow，透過 M18 的 workflow == build_steps 互鎖傳遞性閉環 docstring == build_steps == workflow == README。關掉 CI step 序列最後一份未被守的手寫副本。不動 production code。
 - **M25** — notebook-discovery 行為 parity guard：toolchain 有**三支工具各自獨立**重寫了「`.ipynb` 探索 + `.ipynb_checkpoints` 過濾」這段 walk——converter 的 root-walk（`ipynb_to_py.main`，決定哪些 notebook 會重生 `.py`）、sync checker 的 `_pairs`（決定哪些做 byte-for-byte 比對）、validator 的 `_paired_py_files`（決定哪些生成 `.py` 跑 compile + magic-leak）。三者目前邏輯相同但沒有任何東西強制它們枚舉**同一組** notebook——日後在某一支的 walk 加 skip dir / 動 checkpoint filter 卻漏改另兩支，coverage 就 silently 漂移（notebook 被轉但沒被 sync-check、或被 sync-check 但沒被 compile-validate），而 CI 抓不到（每個 step 只看自己那一片）。M25 依 M9（orphan）/ M18（CI parity）/ M20-M24（README/install parity）precedent，補 `tools/tests/test_discovery_parity.py` 的 `NotebookDiscoveryParityTests`（8 個 test，純 stdlib），但用**行為 parity** 而非 text parsing：在同一棵 fixture tree（root nb + nested nb + root-level/nested `.ipynb_checkpoints/` notebook）上跑三支真實 discovery path，斷言枚舉出的 notebook 集合三方相同。converter 端透過 `--dry-run` 輸出取得真實 walk 結果（不在 test 內複寫 walk 邏輯）。不動 production code。
 
 ## 進度日誌
@@ -875,3 +876,36 @@ python3 -m unittest tools.tests.test_discovery_parity.NotebookDiscoveryParityTes
 #### 副作用 / 注意
 - 若日後想消除這份 discovery 重複（把三支 walk 收斂成一支 shared helper），M25 的 parity test 仍有效：它斷言的是「三個 public discovery 進入點枚舉同一組」，不管底層是三份複本還是一份共用實作都成立，可當重構的安全網
 - converter 端依賴 `--dry-run` 輸出格式（`[dry] <rel> -> <rel_py>`）；若日後改該行格式，`_DRY_RE` 會解析不到、三支 discovery 比對時 converter 集合變空而 FAIL，提醒同步更新 parser
+
+### M26 — `check_all.py` docstring step list ↔ `build_steps()` parity guard
+- 為什麼補：同一條 CI 4-step 序列（unit tests → strict pre-scan → sync check → converted check）在 toolchain 裡被手寫了**四份**：
+  1. `.github/workflows/ipynb-py-sync.yml` 的 `run:` steps（真理來源之一）
+  2. `check_all.build_steps()` 的 argv 構造（M18 用 `WorkflowParityTests` 鎖 == workflow）
+  3. `tools/README.md`「## CI 對應」的 numbered backtick list（M22 用 `ReadmeCiParityTests` 鎖 == workflow）
+  4. **`tools/check_all.py` 自己的模組 docstring**（lines 9-12 的 numbered list）——**完全沒被守**
+  - 前三份已兩兩互鎖，唯獨第四份（工具的自我說明）漂在外面。改了 `build_steps()`（例如拿掉 `--strict`、重排 step）卻忘了同步檔頭 docstring，讀 source 的人就被一份過時的「本工具做什麼」誤導，而沒有任何 test 會紅。這正是 M18 / M20-M24 反覆關掉的「只靠慣例成立」缺口的最後一份副本
+- 解法：補 `tools/tests/test_check_all.py` 的 `DocstringParityTests`（6 個 test，純 stdlib）：
+  - 新增 `_docstring_step_commands()` helper：純 regex（`^\s*\d+\.\s+.*?(python3\s+\S.*?)\s*$`）解析 `check_all.__doc__` 的 numbered 行，抓出尾端 `python3 ...` 指令、丟掉前面的 label
+  - **復用** M18 的 `_step_signature`（normalize 成 `(tool, frozenset(long_flags))`，丟掉 interpreter / path prefix / 尾端 root arg / 單 dash flag），與 `build_steps('.')` 做 ordered 比對——與 workflow / README 同一套 normalization，避免各自一份規則
+  - 6 個 case：docstring 必有 4 條 numbered 指令（parser assumption guard，防 docstring 改格式後 vacuous pass）、count == build_steps、signatures ordered == build_steps、tool 順序 == 四工具固定序、strict pre-scan 同時帶 `--strict` + `--dry-run`、**直接斷言 docstring == workflow**（透過 M18 workflow == build_steps 傳遞性閉環）
+- 設計細節：
+  - docstring 的指令用 `<root>` placeholder（非真實路徑），`_step_signature` 本就忽略非 flag 尾參，所以 `<root>` 自然被丟掉、與 build_steps 的真實 root arg 等價
+  - `test_docstring_lists_four_numbered_commands` 是這類 parser-based parity 的必備 guard：若沒有它，有人把 docstring 改成不符 `N. ... python3 ...` 形狀時 parser 回空 list，其餘比對 trivially 通過，guard 形同虛設（對齊 M22 的同型 guard 與 M18 的 `test_no_multiline_run_blocks`）
+- 為什麼放 test 而非 production：讓 `check_all.py` runtime 去自我 introspect docstring 是不必要耦合；「docstring 與 build_steps 描述同一序列」是 test-only 的文件不變量，與 M18-M25 取捨一致
+- 不需動 production code：`check_all.py` / converter / 三支 checker / hook / CI workflow 全部沒改。純測試新增（一個 helper + 一個 6-test class + module docstring 補一條 pinned 說明）
+- 不需動 README：test 加在既有 `test_check_all.py` 內、未新增 test 檔，M21 的 `ReadmeTestTableParityTests` 仍綠（不像 M25 要補 test-table 一列）
+- 負向驗證（確認 guard 真的會咬）：monkeypatch `check_all.__doc__` 把 docstring 的 `--strict --dry-run` 改成 `--dry-run`（模擬「docstring 漏改」）→ `doc_sigs != build_sigs` 為 True，`test_docstring_signatures_match_build_steps_in_order` 會 FAIL
+- 本地驗證：
+  - `python3 -m unittest tools.tests.test_check_all.DocstringParityTests -v` → `Ran 6 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 192 tests OK`（M25 186 + M26 6）
+  - `python3 tools/check_all.py` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M26 新增的 class
+python3 -m unittest tools.tests.test_check_all.DocstringParityTests -v
+```
+
+#### 副作用 / 注意
+- `_docstring_step_commands()` 依賴 docstring 維持「`N. <label>  python3 <cmd>`」格式；若日後把 docstring 改寫成別種排版（例如改用表格或拿掉 `python3` 前綴），`test_docstring_lists_four_numbered_commands` 會先紅，提醒同步更新 parser，而非 silently 變成 vacuous pass
+- 至此 CI step 序列的四份手寫副本（workflow / build_steps / README / docstring）全部進入互鎖網：M18（workflow↔build_steps）+ M22（README↔workflow）+ M26（docstring↔build_steps 且 ↔workflow），任一份漂移都有 test 咬住
