@@ -31,6 +31,7 @@
 - **M24** — hook-set parity guard：`install.sh` 迴圈 ↔ README 手動安裝 `ln -sf` 區塊 ↔ 實際 `tools/hooks/` 腳本集。M23 之後「toolchain 要裝哪些 git hook」這份清單同時手寫在四個地方：(1) `tools/hooks/` 下的實際腳本（真理來源）、(2) `install.sh` 的 `for hook in pre-commit pre-push` 迴圈、(3) README「## Tools」表（M20 守，但靠**硬編**的 `_HOOK_PATHS`）、(4) README「## 安裝 git hooks」段的手動 `ln -sf` 指令（**完全沒守**）。新增 hook 卻漏改 (2) 或 (4) 就 silently 腐爛。M24 依 M18 / M20 / M21 / M22 precedent 補 `tools/tests/test_readme.py` 的 `InstallParityTests`（6 個 test，純 stdlib）：純 regex 解析 `install.sh` 迴圈與 README 手動 `ln -sf` 區塊，兩邊與「`tools/hooks/` 下除 `install.sh` 外的所有腳本」這個磁碟真理鎖死；並把硬編的 `_HOOK_PATHS` 常數對磁碟驗證。關掉 hook 安裝清單最後兩份未被守的副本。不動 production code。
 - **M26** — `check_all.py` 自身 docstring step list ↔ `build_steps()` parity guard：M18 把 `build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 互鎖、M22 把 README「## CI 對應」list 鎖進 workflow，但同一條 CI 4-step 序列在 `tools/check_all.py` 的**模組 docstring**（lines 9-12 的 numbered list）還有**第四份手寫副本**完全沒被守——改了 `build_steps()` 卻忘了改自己檔頭的 docstring，這份「工具自我說明」就 silently 腐爛（讀 source 的人被誤導）。M26 依 M18 / M22 precedent 補 `tools/tests/test_check_all.py` 的 `DocstringParityTests`（6 個 test，純 stdlib），純 regex 解析 docstring 的 numbered `python3` 指令、**復用** M18 的 `_step_signature`（同一套 normalization）與 `build_steps('.')` 做 ordered 比對；並直接斷言 docstring == workflow，透過 M18 的 workflow == build_steps 互鎖傳遞性閉環 docstring == build_steps == workflow == README。關掉 CI step 序列最後一份未被守的手寫副本。不動 production code。
 - **M25** — notebook-discovery 行為 parity guard：toolchain 有**三支工具各自獨立**重寫了「`.ipynb` 探索 + `.ipynb_checkpoints` 過濾」這段 walk——converter 的 root-walk（`ipynb_to_py.main`，決定哪些 notebook 會重生 `.py`）、sync checker 的 `_pairs`（決定哪些做 byte-for-byte 比對）、validator 的 `_paired_py_files`（決定哪些生成 `.py` 跑 compile + magic-leak）。三者目前邏輯相同但沒有任何東西強制它們枚舉**同一組** notebook——日後在某一支的 walk 加 skip dir / 動 checkpoint filter 卻漏改另兩支，coverage 就 silently 漂移（notebook 被轉但沒被 sync-check、或被 sync-check 但沒被 compile-validate），而 CI 抓不到（每個 step 只看自己那一片）。M25 依 M9（orphan）/ M18（CI parity）/ M20-M24（README/install parity）precedent，補 `tools/tests/test_discovery_parity.py` 的 `NotebookDiscoveryParityTests`（8 個 test，純 stdlib），但用**行為 parity** 而非 text parsing：在同一棵 fixture tree（root nb + nested nb + root-level/nested `.ipynb_checkpoints/` notebook）上跑三支真實 discovery path，斷言枚舉出的 notebook 集合三方相同。converter 端透過 `--dry-run` 輸出取得真實 walk 結果（不在 test 內複寫 walk 邏輯）。不動 production code。
+- **M27** — pre-push hook「mirror CI steps 2-4」契約 parity guard：M23 的 `pre-push` hook 跑 `check_all.py --skip-tests`，讓 push 被 CI 的 artifact 檢查（step 2-4，跳過 unit tests）守門。但有兩個只靠慣例成立的不變量沒被守：(1) hook 指令**真的帶 `--skip-tests`**——整合測試 `PrePushHookTests` 雖然 end-to-end 跑 hook，卻只能**偶然**抓到 `--skip-tests` 被拿掉（其 fixture 沒有 `tools/tests/` 目錄，full check_all 的 `unittest discover -s tools/tests` 會丟 `ImportError` 而 rc≠0），這很脆弱：失敗訊息是含糊的「Start directory is not importable」、看不出真因是少了 flag，且若 fixture 哪天放了空的 `tools/tests/`，discover 找到 0 test 回 rc 0，drop 就漏網；(2) `build_steps(skip_tests=True)` == 「CI step 2-4」（hook docstring 的宣稱）== workflow run-steps 砍掉那一個 unit-test step——M18 只鎖了 full `build_steps == workflow`，沒人把 skip_tests 子集綁到 workflow。M27 依 M18 / M22 / M26 precedent 補 `tools/tests/test_check_all.py` 的 `PrePushParityTests`（7 個 test，純 stdlib）：純 regex + `shlex` 解析 hook 的 `check_all.py` 指令、斷言帶 `--skip-tests` 且不帶其他 long flag（文字層、像 M24 解析 `install.sh`）；並**復用** M18 的 `_step_signature` / `_workflow_run_commands` 斷言 skip_tests 恰好砍掉第一個（unit-test）step、其餘 2-4 與 workflow 砍掉 unittest 後逐一相符。關掉 hook 契約最後一份未被守的副本。不動 production code。
 
 ## 進度日誌
 
@@ -909,3 +910,35 @@ python3 -m unittest tools.tests.test_check_all.DocstringParityTests -v
 #### 副作用 / 注意
 - `_docstring_step_commands()` 依賴 docstring 維持「`N. <label>  python3 <cmd>`」格式；若日後把 docstring 改寫成別種排版（例如改用表格或拿掉 `python3` 前綴），`test_docstring_lists_four_numbered_commands` 會先紅，提醒同步更新 parser，而非 silently 變成 vacuous pass
 - 至此 CI step 序列的四份手寫副本（workflow / build_steps / README / docstring）全部進入互鎖網：M18（workflow↔build_steps）+ M22（README↔workflow）+ M26（docstring↔build_steps 且 ↔workflow），任一份漂移都有 test 咬住
+
+### M27 — pre-push hook「mirror CI steps 2-4」契約 parity guard
+- 為什麼補：M23 的 `tools/hooks/pre-push` 跑 `check_all.py --skip-tests`，把 CI 的 artifact 檢查（strict pre-scan + sync + converted，即 step 2-4）前移到 push 前，刻意跳過 unit tests（step 1）。但這份「mirror CI steps 2-4」契約有兩個只靠慣例成立、沒被任何 test 鎖死的不變量：
+  1. **hook 指令真的帶 `--skip-tests`**：少了它，hook 會在每次 push 重跑整個 unit-test suite——正是它自己 docstring 說「intentionally skipped」的行為。整合測試 `PrePushHookTests`（M23）雖然 end-to-end 起真 git repo 跑 hook，但它**只能偶然**抓到這個 drop：fixture 沒複製 `tools/tests/` 目錄，所以 full check_all 的 `unittest discover -s tools/tests` 會丟 `ImportError: Start directory is not importable`（rc≠0）→ 阻擋 push → 期望乾淨 push 的 test 失敗。這條偶然性很脆弱：(a) 失敗訊息是含糊的 import error，完全看不出真因是「hook 少了 `--skip-tests`」；(b) 若 fixture 哪天改成放一個**空的** `tools/tests/`，`discover` 找到 0 test 回 rc 0，drop 就完全漏網。
+  2. **`build_steps(skip_tests=True)` == 「CI step 2-4」**（hook docstring 的宣稱）== workflow run-steps 砍掉那唯一一個 unit-test step。M18 的 `WorkflowParityTests` 只鎖了 full `build_steps(skip_tests=False) == workflow`；沒有任何 test 把 skip_tests **子集**綁回 workflow。
+- 解法：補 `tools/tests/test_check_all.py` 的 `PrePushParityTests`（7 個 test，純 stdlib）：
+  - 新增 `_prepush_check_all_tokens()` helper：讀 `tools/hooks/pre-push`，找含 `check_all.py` + `python3` 的行，regex 去掉 `if ! ` 前綴與 `; then` 尾巴後 `shlex.split` 成 token list（文字層解析，像 M24 解析 `install.sh` 迴圈）
+  - **文字層 3 test**：hook 存在、hook 真的 invoke `check_all.py`、hook 帶 `--skip-tests` 且**只**帶這一個 long flag（`test_hook_carries_only_skip_tests` 反向擋掉「有人多塞 `--quiet` 等 flag silently 改變 push 守門條件」——這條整合測試完全不會 flag）
+  - **parity 3 test**：`test_skip_tests_drops_exactly_the_first_step`（`build_steps(skip_tests=True)` 的 signature == full `[1:]`）、`test_dropped_step_is_the_unittest_one`（被砍的第一步 label 含 `unit tests` 且 tool == `unittest`）、`test_skip_tests_steps_match_workflow_minus_unittest`（**復用** M18 `_step_signature` / `_workflow_run_commands`，斷言 skip_tests 步驟 == workflow run-steps 過濾掉 unittest 後逐一相符，且恰好只有一個 unittest step 被砍）
+- 設計細節：
+  - 復用 M18 的 `_step_signature`（normalize 成 `(tool, frozenset(long_flags))`）與 `_workflow_run_commands`，所以 skip_tests 子集與 workflow 的比對用的是與 `WorkflowParityTests` / `DocstringParityTests` 同一套 normalization——artifact 子集的 parity 是 full parity 的同型投影，不另立一套規則
+  - 放 test 而非 production：讓 hook 或 check_all runtime 去自我比對是不必要耦合；「hook 帶 `--skip-tests`」「skip_tests == workflow 砍 unittest」是 test-only 的契約不變量，與 M18-M26 取捨一致
+- 不需動 production code：`pre-push` / `check_all.py` / converter / 三支 checker / CI workflow 全部沒改。純測試新增（一個 module 常數 + 一個 helper + 一個 7-test class + module docstring 補一段）
+- 不需動 README：test 加在既有 `test_check_all.py` 內、未新增 test 檔，M21 的 `ReadmeTestTableParityTests` 仍綠（同 M26，不像 M25 要補 test-table 一列）
+- 負向驗證（皆跑完用 backup 還原成 byte-identical，`git diff --stat` 確認空）：
+  1. 把 hook 的 `check_all.py --skip-tests` 改成 `check_all.py`（模擬「漏掉 flag」）→ `PrePushParityTests` FAIL 2（`test_hook_passes_skip_tests` + `test_hook_carries_only_skip_tests`），訊息直指少了 `--skip-tests`
+  2. 同一個 mutation 下跑 `PrePushHookTests` → 確認它**確實**會失敗，但失敗於含糊的 `ImportError: Start directory is not importable`（證實前述「偶然且訊息不明」的判斷，校正了原本「整合測試完全不會抓到」的誤判）
+  3. 把 `build_steps` 的 `if not skip_tests:` 改成 `if not False:`（模擬「skip_tests 不再砍 unittest」）→ FAIL 2（`test_skip_tests_drops_exactly_the_first_step` + `test_skip_tests_steps_match_workflow_minus_unittest`）
+- 本地驗證：
+  - `python3 -m unittest tools.tests.test_check_all.PrePushParityTests -v` → `Ran 7 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 199 tests OK`（M26 192 + M27 7）
+  - `python3 tools/check_all.py` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M27 新增的 class
+python3 -m unittest tools.tests.test_check_all.PrePushParityTests -v
+```
+
+#### 副作用 / 注意
+- `_prepush_check_all_tokens()` 依賴 hook 維持「`if ! python3 ... check_all.py ...; then`」這種單行 `if !` 守衛形狀；若日後把 hook 改寫成多行（先 assign 變數再 `if`、或拆成 function），parser 會抓不到該行而在 `_prepush_check_all_tokens` raise（test error，非 silent pass），提醒同步更新 parser
+- 至此 hook 端的兩條契約都進互鎖網：M24 鎖「要裝哪些 hook」（install.sh ↔ README ↔ 磁碟），M27 鎖「pre-push hook 怎麼跑 == CI 的哪幾步」

@@ -12,6 +12,11 @@ check). These tests pin:
     steps a *fourth* time (after the workflow, build_steps, and the README CI
     section); DocstringParityTests locks it == build_steps() so the file's
     self-documentation can't silently rot
+  - pre-push parity -- the pre-push hook (M23) runs `check_all.py --skip-tests`
+    so a push is gated on CI steps 2-4 (artifact checks minus the unit tests);
+    PrePushParityTests locks both that the hook command carries --skip-tests
+    (text level) and that build_steps(skip_tests=True) == the workflow's
+    run-steps minus the unit-test step
   - one real-repo integration smoke (rc=0 against the live tree, --skip-tests
     to avoid re-running the whole suite inside a test)
 
@@ -34,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 TOOLS = HERE.parent
 REPO = TOOLS.parent
 WORKFLOW = REPO / '.github' / 'workflows' / 'ipynb-py-sync.yml'
+PRE_PUSH = TOOLS / 'hooks' / 'pre-push'
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
@@ -410,6 +416,102 @@ class WorkflowParityTests(unittest.TestCase):
         self.assertIn('--dry-run', wf_prescan[1])
         build_prescan = _step_signature(_argv(build_steps('.'), 'strict pre-scan'))
         self.assertEqual(wf_prescan, build_prescan)
+
+
+# --- pre-push parity (drift guard) -------------------------------------------
+# The pre-push hook (M23) runs `check_all.py --skip-tests` so a push is gated on
+# the same artifact checks CI runs minus the unit-test step. Two invariants held
+# only by convention until M27:
+#   1. the hook command actually carries --skip-tests. PrePushHookTests does
+#      exercise the hook end-to-end, but it only catches a dropped --skip-tests
+#      *incidentally*: its fixture has no tools/tests/ dir, so a full check_all's
+#      `unittest discover -s tools/tests` raises ImportError (rc != 0) and the
+#      push-blocks. That is fragile -- the failure is an opaque "Start directory
+#      is not importable" with no hint the real cause is a missing flag, and if
+#      the fixture ever contained an empty tools/tests/, discover would find 0
+#      tests (rc 0) and the drop would pass undetected. A direct text-level
+#      assertion catches it intentionally, with an actionable message.
+#   2. build_steps(skip_tests=True) == "CI steps 2-4" (the hook docstring's
+#      claim) == the workflow's run-steps minus the single unit-test step. No
+#      existing test ties skip_tests to the workflow; M18 only locks the full
+#      build_steps == workflow.
+# Same precedent as M18 (workflow parity) / M22 (README CI list) / M26 (docstring):
+# a hand-written contract that held by convention becomes true by test. Reuses
+# the M18 _step_signature / _workflow_run_commands normalization throughout.
+
+
+def _prepush_check_all_tokens() -> list[str]:
+    """shlex tokens of the check_all.py invocation inside the pre-push hook.
+
+    The hook line looks like ``if ! python3 tools/check_all.py --skip-tests; then``;
+    we strip the ``if ! `` guard and trailing ``; then`` and split the rest so
+    the flags the hook actually passes can be asserted at the text level.
+    """
+    for line in PRE_PUSH.read_text().splitlines():
+        if 'check_all.py' in line and 'python3' in line:
+            cmd = line.strip()
+            cmd = re.sub(r'^if\s+!\s+', '', cmd)
+            cmd = re.sub(r'\s*;\s*then\s*$', '', cmd)
+            return shlex.split(cmd)
+    raise AssertionError('pre-push hook does not invoke python3 ... check_all.py')
+
+
+class PrePushParityTests(unittest.TestCase):
+    def test_pre_push_hook_exists(self):
+        self.assertTrue(PRE_PUSH.is_file(), f'missing pre-push hook: {PRE_PUSH}')
+
+    def test_hook_invokes_check_all(self):
+        toks = _prepush_check_all_tokens()
+        self.assertTrue(
+            any(t.endswith('check_all.py') for t in toks),
+            f'pre-push hook should run check_all.py, got {toks!r}',
+        )
+
+    def test_hook_passes_skip_tests(self):
+        toks = _prepush_check_all_tokens()
+        self.assertIn(
+            '--skip-tests', toks,
+            'pre-push hook must run check_all.py --skip-tests; without it the '
+            'hook re-runs the whole unit-test suite on every push (the behaviour '
+            'its docstring says is intentionally avoided). The integration '
+            'PrePushHookTests only catches this incidentally (its fixture has no '
+            'tools/tests/, so discover raises ImportError); this guard catches it '
+            'directly at the text level.',
+        )
+
+    def test_hook_carries_only_skip_tests(self):
+        # --skip-tests is the only behaviour flag the hook should pass; a stray
+        # --quiet (or anything else) would silently change what a push is gated on.
+        toks = _prepush_check_all_tokens()
+        long_flags = {t for t in toks if t.startswith('--')}
+        self.assertEqual(long_flags, {'--skip-tests'})
+
+    def test_skip_tests_drops_exactly_the_first_step(self):
+        full = [_step_signature(argv) for _, argv in build_steps('.')]
+        skipped = [_step_signature(argv) for _, argv in build_steps('.', skip_tests=True)]
+        self.assertEqual(
+            skipped, full[1:],
+            'skip_tests must drop exactly the first step and keep steps 2-4 in order.',
+        )
+
+    def test_dropped_step_is_the_unittest_one(self):
+        first_label, first_argv = build_steps('.')[0]
+        self.assertIn('unit tests', first_label)
+        self.assertEqual(_step_signature(first_argv)[0], 'unittest')
+
+    def test_skip_tests_steps_match_workflow_minus_unittest(self):
+        # Ties the hook docstring's "CI steps 2-4" claim directly to the workflow:
+        # build_steps(skip_tests=True) == the workflow run-steps after dropping
+        # the single unit-test step. Reuses the M18 normalization so this is the
+        # same contract as WorkflowParityTests, just on the artifact subset.
+        wf_sigs = [_step_signature(shlex.split(c)) for c in _workflow_run_commands()]
+        wf_artifact = [s for s in wf_sigs if s[0] != 'unittest']
+        self.assertEqual(
+            len(wf_sigs) - len(wf_artifact), 1,
+            'expected exactly one unit-test step in the workflow to drop',
+        )
+        skipped = [_step_signature(argv) for _, argv in build_steps('.', skip_tests=True)]
+        self.assertEqual(skipped, wf_artifact)
 
 
 if __name__ == '__main__':
