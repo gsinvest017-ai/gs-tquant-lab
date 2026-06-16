@@ -97,6 +97,37 @@ class SanitizeCodeTests(unittest.TestCase):
     def test_double_question_suffix_commented(self):
         self.assertEqual(_sanitize_code('obj??'), '# obj??\n')
 
+    def test_dotted_attribute_help_commented(self):
+        # `df.head?` is real IPython suffix-help; still commented.
+        self.assertEqual(_sanitize_code('df.head?'), '# df.head?\n')
+
+    def test_subscript_and_call_help_commented(self):
+        # Reference chains with subscripts / calls before the `?` are help too.
+        self.assertEqual(_sanitize_code('a[0]?'), '# a[0]?\n')
+        self.assertEqual(_sanitize_code('np.svd()??'), '# np.svd()??\n')
+
+    def test_trailing_question_in_comment_preserved(self):
+        # REGRESSION GUARD (M28): the old `endswith('?')` rule silently turned
+        # this valid line into a comment. Because the converter and the sync
+        # checker share _sanitize_code, CI could not catch the corruption.
+        # A trailing `?` inside a comment must leave the code untouched.
+        self.assertEqual(
+            _sanitize_code('x = run()  # is this right?'),
+            'x = run()  # is this right?\n',
+        )
+
+    def test_prose_line_ending_in_question_preserved(self):
+        # A line inside a triple-quoted string / docstring may end in `?` as
+        # prose. The multi-word form (whitespace before the `?`) is not a
+        # reference chain, so it must pass through verbatim rather than be
+        # commented (which would corrupt the string body).
+        self.assertEqual(_sanitize_code('Are you ready?'), 'Are you ready?\n')
+
+    def test_comment_line_ending_in_question_not_double_commented(self):
+        # A pure comment line ending in `?` is already a comment; the old rule
+        # double-commented it to `# # ...`. It must pass through verbatim.
+        self.assertEqual(_sanitize_code('# really?'), '# really?\n')
+
     def test_indented_magic_commented(self):
         # _sanitize_code uses lstrip() to detect magics even after whitespace
         self.assertEqual(_sanitize_code('    !echo hi'), '#     !echo hi\n')

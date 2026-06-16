@@ -2,7 +2,12 @@
 
 Pure stdlib — no nbformat/nbconvert dependency. Strips outputs.
 Markdown / raw cells become comment blocks; code cells are emitted verbatim.
-Magics (lines starting with % or !) are commented out so the .py is importable.
+Magics (lines starting with % or !) and IPython help syntax (a bare object
+reference chain ending in `?`/`??`, e.g. `df.head?`, or the `?obj` prefix form)
+are commented out so the .py is importable. The help-suffix match is anchored to
+an identifier/attribute/subscript/call chain (see _HELP_SUFFIX_RE) rather than a
+naive `endswith('?')`, so a legitimate line such as `x = run()  # done?` is left
+untouched instead of being silently turned into a comment.
 
 By default a malformed notebook is reported to stderr but the batch continues
 and rc=0 if at least the loop completed; pass --strict to flip that into a
@@ -18,12 +23,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 
 HEADER = '# -*- coding: utf-8 -*-\n# Auto-generated from {src} by tools/ipynb_to_py.py\n# Do not edit by hand; re-run the converter to regenerate.\n\n'
 CELL_SEP = '# %% [{kind}] cell {idx}\n'
+
+# IPython suffix-help syntax: a bare object reference chain (identifier, dotted
+# attributes, subscripts, calls) terminated by `?` or `??`. Matching this rather
+# than `endswith('?')` keeps real Python whose line happens to end in `?` — a
+# trailing-question comment (`run()  # ok?`) or a spaced expression — out of the
+# comment-out branch, so valid code is never silently dropped.
+_HELP_SUFFIX_RE = re.compile(r'^[A-Za-z_][\w.]*(?:\[[^\]]*\]|\([^)]*\))*\?{1,2}$')
 
 
 def _comment_block(text: str) -> str:
@@ -35,7 +48,7 @@ def _sanitize_code(text: str) -> str:
     out = []
     for ln in text.splitlines():
         stripped = ln.lstrip()
-        if stripped.startswith(('%', '!', '?')) or stripped.endswith('?'):
+        if stripped.startswith(('%', '!', '?')) or _HELP_SUFFIX_RE.match(stripped):
             out.append('# ' + ln)
         else:
             out.append(ln)

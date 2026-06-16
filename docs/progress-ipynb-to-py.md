@@ -32,6 +32,7 @@
 - **M26** — `check_all.py` 自身 docstring step list ↔ `build_steps()` parity guard：M18 把 `build_steps()` 與 `.github/workflows/ipynb-py-sync.yml` 互鎖、M22 把 README「## CI 對應」list 鎖進 workflow，但同一條 CI 4-step 序列在 `tools/check_all.py` 的**模組 docstring**（lines 9-12 的 numbered list）還有**第四份手寫副本**完全沒被守——改了 `build_steps()` 卻忘了改自己檔頭的 docstring，這份「工具自我說明」就 silently 腐爛（讀 source 的人被誤導）。M26 依 M18 / M22 precedent 補 `tools/tests/test_check_all.py` 的 `DocstringParityTests`（6 個 test，純 stdlib），純 regex 解析 docstring 的 numbered `python3` 指令、**復用** M18 的 `_step_signature`（同一套 normalization）與 `build_steps('.')` 做 ordered 比對；並直接斷言 docstring == workflow，透過 M18 的 workflow == build_steps 互鎖傳遞性閉環 docstring == build_steps == workflow == README。關掉 CI step 序列最後一份未被守的手寫副本。不動 production code。
 - **M25** — notebook-discovery 行為 parity guard：toolchain 有**三支工具各自獨立**重寫了「`.ipynb` 探索 + `.ipynb_checkpoints` 過濾」這段 walk——converter 的 root-walk（`ipynb_to_py.main`，決定哪些 notebook 會重生 `.py`）、sync checker 的 `_pairs`（決定哪些做 byte-for-byte 比對）、validator 的 `_paired_py_files`（決定哪些生成 `.py` 跑 compile + magic-leak）。三者目前邏輯相同但沒有任何東西強制它們枚舉**同一組** notebook——日後在某一支的 walk 加 skip dir / 動 checkpoint filter 卻漏改另兩支，coverage 就 silently 漂移（notebook 被轉但沒被 sync-check、或被 sync-check 但沒被 compile-validate），而 CI 抓不到（每個 step 只看自己那一片）。M25 依 M9（orphan）/ M18（CI parity）/ M20-M24（README/install parity）precedent，補 `tools/tests/test_discovery_parity.py` 的 `NotebookDiscoveryParityTests`（8 個 test，純 stdlib），但用**行為 parity** 而非 text parsing：在同一棵 fixture tree（root nb + nested nb + root-level/nested `.ipynb_checkpoints/` notebook）上跑三支真實 discovery path，斷言枚舉出的 notebook 集合三方相同。converter 端透過 `--dry-run` 輸出取得真實 walk 結果（不在 test 內複寫 walk 邏輯）。不動 production code。
 - **M27** — pre-push hook「mirror CI steps 2-4」契約 parity guard：M23 的 `pre-push` hook 跑 `check_all.py --skip-tests`，讓 push 被 CI 的 artifact 檢查（step 2-4，跳過 unit tests）守門。但有兩個只靠慣例成立的不變量沒被守：(1) hook 指令**真的帶 `--skip-tests`**——整合測試 `PrePushHookTests` 雖然 end-to-end 跑 hook，卻只能**偶然**抓到 `--skip-tests` 被拿掉（其 fixture 沒有 `tools/tests/` 目錄，full check_all 的 `unittest discover -s tools/tests` 會丟 `ImportError` 而 rc≠0），這很脆弱：失敗訊息是含糊的「Start directory is not importable」、看不出真因是少了 flag，且若 fixture 哪天放了空的 `tools/tests/`，discover 找到 0 test 回 rc 0，drop 就漏網；(2) `build_steps(skip_tests=True)` == 「CI step 2-4」（hook docstring 的宣稱）== workflow run-steps 砍掉那一個 unit-test step——M18 只鎖了 full `build_steps == workflow`，沒人把 skip_tests 子集綁到 workflow。M27 依 M18 / M22 / M26 precedent 補 `tools/tests/test_check_all.py` 的 `PrePushParityTests`（7 個 test，純 stdlib）：純 regex + `shlex` 解析 hook 的 `check_all.py` 指令、斷言帶 `--skip-tests` 且不帶其他 long flag（文字層、像 M24 解析 `install.sh`）；並**復用** M18 的 `_step_signature` / `_workflow_run_commands` 斷言 skip_tests 恰好砍掉第一個（unit-test）step、其餘 2-4 與 workflow 砍掉 unittest 後逐一相符。關掉 hook 契約最後一份未被守的副本。不動 production code。
+- **M28** — `_sanitize_code` IPython-help 偵測精準化（修掉 latent code-corruption bug）：converter 一直用 naive `stripped.endswith('?')` 判斷 IPython suffix-help（`obj?` / `obj??`），但這會 false-positive 把任何結尾是 `?` 的**合法 Python 行**整行註解掉——`x = run()  # done?`（trailing-question comment）、triple-quoted string 內 prose 行 `Are you ready?`、甚至把已是註解的 `# really?` 變成 `# # really?`。最毒的是 converter 與 sync checker **共用** `_sanitize_code`，所以「valid code 被靜默註解掉」CI **抓不到**（重生與比對用同一條壞規則，byte-for-byte 永遠相符）。M28 把 `endswith('?')` 換成錨定 identifier/attribute/subscript/call chain 的 `_HELP_SUFFIX_RE`，只有「裸物件參照鏈 + 結尾 `?`/`??`」才算 help。**provably byte-for-byte 安全**：先掃過全 repo 確認 77 個 notebook 目前有 **0** 行 code cell 結尾是 `?` 而非 magic（該 branch 目前 comment 出 0 行），收緊規則零 regen。補 5 個 test 進 `SanitizeCodeTests` + 更新模組 docstring。動 converter（一行 + 一條 regex 常數），不動三支 checker / hook / CI workflow。
 
 ## 進度日誌
 
@@ -942,3 +943,44 @@ python3 -m unittest tools.tests.test_check_all.PrePushParityTests -v
 #### 副作用 / 注意
 - `_prepush_check_all_tokens()` 依賴 hook 維持「`if ! python3 ... check_all.py ...; then`」這種單行 `if !` 守衛形狀；若日後把 hook 改寫成多行（先 assign 變數再 `if`、或拆成 function），parser 會抓不到該行而在 `_prepush_check_all_tokens` raise（test error，非 silent pass），提醒同步更新 parser
 - 至此 hook 端的兩條契約都進互鎖網：M24 鎖「要裝哪些 hook」（install.sh ↔ README ↔ 磁碟），M27 鎖「pre-push hook 怎麼跑 == CI 的哪幾步」
+
+### M28 — `_sanitize_code` IPython-help 偵測精準化（修掉 latent code-corruption bug）
+- 為什麼補：M18-M27 連續十個 milestone 都在補 parity guard（把只靠慣例成立的不變量鎖進 test），但 converter 本身藏了一個**真實的功能 bug**從沒被處理。`_sanitize_code` 用 `stripped.startswith(('%','!','?')) or stripped.endswith('?')` 判斷哪些行要註解掉以保 `.py` 可 `py_compile`。前半（magic / `?prefix`）正確，後半 `endswith('?')` 是想抓 IPython suffix-help（`obj?` / `obj??`），但它會把**任何結尾是 `?` 的合法 Python 行**整行 `# ` 掉：
+  - `x = run()  # is this right?` → 變成 `# x = run()  # is this right?`（valid code 整行消失）
+  - triple-quoted string / docstring 內的 prose 行 `Are you ready?` → 被註解，**改壞字串內容**
+  - 已是註解的 `# really?` → 變成 `# # really?`
+- 為什麼 CI 抓不到（這才是真正危險處）：converter 與 sync checker（`check_ipynb_py_sync.py`）**共用同一個 `_sanitize_code`**（M6 刻意這樣設計避免兩份規則漂移）。所以「壞規則把 valid code 註解掉」時，重生的 expected text 與磁碟 `.py` 仍 byte-for-byte 相符 → sync check 綠、`py_compile` 也綠（被註解的行不會 compile error）→ **整條 CI 都不會紅**。這是 shared-logic 的盲區：規則錯了，但所有靠該規則互相驗證的檢查一起錯，彼此圓謊
+- 先確認影響面（決定要不要 regen）：掃全 repo 77 個 notebook 的 code cell，找「結尾是 `?` 且不以 magic 開頭」的行 → **0 行**。代表 `endswith('?')` branch 目前實際 comment 出 0 行，是純 latent trap（哪天有人寫 `df.head()  # 對嗎?` 就中招，且中招了也沒人會發現）
+- 解法：把 `endswith('?')` 換成錨定的 `_HELP_SUFFIX_RE`：
+  ```python
+  _HELP_SUFFIX_RE = re.compile(r'^[A-Za-z_][\w.]*(?:\[[^\]]*\]|\([^)]*\))*\?{1,2}$')
+  ```
+  只有「identifier 起頭 + dotted attr + 可選 subscript/call chain + 結尾 `?` 或 `??`」整行精確相符才算 IPython suffix-help。`df.head?`、`np.svd()??`、`a[0]?`、`obj??` 仍被抓；帶 `=` / 空白 / `#` 的真實程式碼行因為無法整行匹配而被放過
+- **provably byte-for-byte 安全**（零 regen）：因為現存 0 行會走舊 `endswith('?')` branch，新規則對這 0 行的判定無論如何都不改任何輸出。實測 `python3 tools/ipynb_to_py.py .` 重生全部 77 檔後 `git diff --stat` 只有 `tools/ipynb_to_py.py` + `test_ipynb_to_py.py` 兩支 source，**無任何 `.py` sibling 變動**
+- 補 5 個 test 進 `SanitizeCodeTests`（原 11 → 16，加上既有共 17）：
+  - **`test_dotted_attribute_help_commented`** — `df.head?` 仍註解（real help 不漏放）
+  - **`test_subscript_and_call_help_commented`** — `a[0]?`、`np.svd()??` 仍註解
+  - **`test_trailing_question_in_comment_preserved`** — `x = run()  # is this right?` 保留（核心 regression guard，docstring 寫明這是 M28 修掉的 shared-rule 盲區）
+  - **`test_prose_line_ending_in_question_preserved`** — `Are you ready?` 保留（string body 不被改壞）
+  - **`test_comment_line_ending_in_question_not_double_commented`** — `# really?` 不變成 `# # really?`
+  - 既有 `test_question_suffix_commented`（`help?`）/ `test_double_question_suffix_commented`（`obj??`）/ `test_question_prefix_commented`（`?help`）全部不動仍綠
+- 更新模組 docstring：把「Magics ... commented out」那段補上 help-suffix 改用 reference-chain 偵測、不再 naive `endswith('?')` 的說明，讓 `--help` 與 source 讀者看得到
+- 為什麼動 production code（與 M18-M27 不同）：M18-M27 都明寫「不動 production code」，因為它們鎖的是文件/慣例不變量。M28 不一樣——這是 converter 行為本身的 correctness bug，必須改 production。但改動極小（一行條件 + 一條 module-level regex 常數 + docstring），且零 regen、零行為差異於現存 corpus，風險面收斂到「未來含 trailing-`?` 的 notebook 會被正確處理」
+- 不動：三支 checker / `pre-commit` / `pre-push` / `install.sh` / CI workflow / README / `.gitattributes` 全部沒改。`check_all.py` 的 step 序列不變，M18 / M22 / M26 / M27 的 parity guard 全綠
+- 本地驗證：
+  - `python3 -m unittest tools.tests.test_ipynb_to_py.SanitizeCodeTests -v` → `Ran 17 tests OK`
+  - `python3 -m unittest discover -s tools/tests` → `Ran 204 tests OK`（M27 199 + M28 5）
+  - `python3 tools/ipynb_to_py.py .` → `Converted 77/77`、`git diff --stat` 無 `.py` sibling 變動
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/check_converted_py.py --quiet` → 77/77 OK、exit 0
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+
+#### 用法
+```bash
+# 只跑 M28 相關的 sanitize 測試
+python3 -m unittest tools.tests.test_ipynb_to_py.SanitizeCodeTests -v
+```
+
+#### 副作用 / 注意
+- `_HELP_SUFFIX_RE` 仍會把「整行只有一個裸 identifier-chain + `?`」的字串內行（例如 docstring 裡單獨一行寫 `ready?`）誤判為 help 而註解——這是 line-by-line sanitize 無法得知「此行在多行字串內」的固有限制，與舊 `endswith('?')` 行為一致、非 M28 引入的回歸。M28 修的是**帶 `=` / 空白 / `#` 的常見 false positive**（trailing-question comment 與多字 prose），這才是實務上會踩的情境
+- 若日後真要連 string-internal 的 `?` 都正確保留，需要 tokenize 整個 cell（追蹤字串/註解狀態），那是比 stdlib regex 重得多的改動，目前不值得
