@@ -17,6 +17,11 @@ check). These tests pin:
     PrePushParityTests locks both that the hook command carries --skip-tests
     (text level) and that build_steps(skip_tests=True) == the workflow's
     run-steps minus the unit-test step
+  - trigger parity -- the workflow's `on.push.paths` and `on.pull_request.paths`
+    filters are a hand-duplicated pair (and decide *whether* CI runs at all);
+    WorkflowTriggerParityTests locks them identical to each other and == the
+    canonical trigger set, so a path added/dropped on one side (or silently
+    narrowing what re-runs CI) can't rot unnoticed
   - one real-repo integration smoke (rc=0 against the live tree, --skip-tests
     to avoid re-running the whole suite inside a test)
 
@@ -512,6 +517,124 @@ class PrePushParityTests(unittest.TestCase):
         )
         skipped = [_step_signature(argv) for _, argv in build_steps('.', skip_tests=True)]
         self.assertEqual(skipped, wf_artifact)
+
+
+# --- trigger parity (drift guard) --------------------------------------------
+# M18/M22/M26/M27 locked the workflow's *run-steps* (what CI does) against
+# build_steps / README / docstring / pre-push. But the workflow also has a
+# `paths:` trigger filter -- written out twice, once under `on.push` and once
+# under `on.pull_request` -- that decides *whether the sync CI runs at all*.
+# Nothing guards those two hand-maintained copies: add a path to one and forget
+# the other and push-vs-PR silently cover different file sets; drop `**/*.ipynb`
+# or `tools/**` by accident and CI quietly stops re-running on the very changes
+# it exists to catch (a far more dangerous "green" than a failing step). Same
+# precedent as every parity guard since M18 -- a duplicate held by convention
+# becomes true by test. Stdlib-only line parser (PyYAML is PEP 668 locked);
+# the tests pin the structural shape it assumes.
+
+# The canonical set of paths that must trigger the sync CI. Adding a genuinely
+# new trigger path is a deliberate act -- update this set in the same commit so
+# the lock stays meaningful (same convention as M21's README test-table lock).
+_EXPECTED_TRIGGER_PATHS = [
+    '**/*.ipynb',
+    '**/*.py',
+    'tools/**',
+    '.github/workflows/ipynb-py-sync.yml',
+]
+
+
+def _workflow_trigger_paths() -> dict[str, list[str]]:
+    """Parse on.<event>.paths lists from the workflow yaml (stdlib only).
+
+    Returns ``{event: [path, ...]}`` for each of ``push`` / ``pull_request``
+    that declares a ``paths:`` filter, quotes stripped, order preserved.
+    Assumes the two-level ``on: -> <event>: -> paths:`` shape this workflow
+    uses (event header at 2-space indent, ``paths:`` at 4, items deeper). A
+    structural change (paths-ignore, a multiline list, reindent) yields a
+    different/empty parse, which WorkflowTriggerParityTests catches by pinning
+    the expected shape -- fail loudly, update the parser, never mis-read.
+    """
+    result: dict[str, list[str]] = {}
+    event: str | None = None
+    in_paths = False
+    paths_indent = -1
+    for line in WORKFLOW.read_text().splitlines():
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        stripped = line.strip()
+        m_event = re.match(r'(push|pull_request):\s*$', stripped)
+        if m_event and indent == 2:
+            event = m_event.group(1)
+            in_paths = False
+            continue
+        if event and indent == 4 and re.match(r'paths:\s*$', stripped):
+            in_paths = True
+            paths_indent = indent
+            result.setdefault(event, [])
+            continue
+        if in_paths:
+            m_item = re.match(r'-\s*(\S.*?)\s*$', stripped)
+            if m_item and indent > paths_indent:
+                result[event].append(m_item.group(1).strip().strip('\'"'))
+                continue
+            in_paths = False
+    return result
+
+
+class WorkflowTriggerParityTests(unittest.TestCase):
+    def test_both_events_declare_paths(self):
+        paths = _workflow_trigger_paths()
+        self.assertIn('push', paths, 'on.push.paths not found (parser or yaml drift)')
+        self.assertIn('pull_request', paths,
+                      'on.pull_request.paths not found (parser or yaml drift)')
+        self.assertTrue(paths['push'], 'on.push.paths parsed empty')
+        self.assertTrue(paths['pull_request'], 'on.pull_request.paths parsed empty')
+
+    def test_push_and_pull_request_paths_identical(self):
+        # The core guard: the two hand-duplicated filters must not drift.
+        paths = _workflow_trigger_paths()
+        self.assertEqual(
+            paths['push'], paths['pull_request'],
+            'on.push.paths and on.pull_request.paths drifted apart.\n'
+            f'  push:         {paths["push"]}\n'
+            f'  pull_request: {paths["pull_request"]}\n'
+            'A change to one trigger filter was not mirrored on the other, so '
+            'push and PR builds now run on different file sets. Edit both in '
+            '.github/workflows/ipynb-py-sync.yml together.',
+        )
+
+    def test_trigger_paths_match_expected_set(self):
+        # Locks the trigger surface so silently narrowing it (dropping a glob)
+        # -- which makes CI quietly stop running on relevant changes -- fails.
+        paths = _workflow_trigger_paths()
+        self.assertEqual(
+            paths['push'], _EXPECTED_TRIGGER_PATHS,
+            'workflow trigger paths drifted from the canonical set.\n'
+            f'  workflow: {paths["push"]}\n'
+            f'  expected: {_EXPECTED_TRIGGER_PATHS}\n'
+            'If this change is intentional, update _EXPECTED_TRIGGER_PATHS in '
+            'this test in the same commit.',
+        )
+
+    def test_notebook_and_py_globs_present(self):
+        # The two artifact globs are why this CI exists: a .ipynb or .py edit
+        # must re-run the sync/converted checks.
+        push = _workflow_trigger_paths()['push']
+        self.assertIn('**/*.ipynb', push)
+        self.assertIn('**/*.py', push)
+
+    def test_tools_dir_triggers_ci(self):
+        # A change to any tool / test / hook under tools/ must re-run CI -- the
+        # checks' own logic lives there.
+        self.assertIn('tools/**', _workflow_trigger_paths()['push'])
+
+    def test_workflow_self_referenced_in_paths(self):
+        # Editing the workflow itself must re-trigger it; assert its own
+        # repo-relative path is in the filter (computed, not hard-coded).
+        rel = str(WORKFLOW.relative_to(REPO)).replace('\\', '/')
+        self.assertIn(rel, _workflow_trigger_paths()['push'],
+                      f'workflow does not list its own path {rel!r} as a trigger')
 
 
 if __name__ == '__main__':
