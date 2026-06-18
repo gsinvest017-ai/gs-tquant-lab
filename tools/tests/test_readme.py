@@ -13,6 +13,8 @@ must equal the real test set.
   - ReadmeParityTests          -- "## Tools" table  vs  tools/*.py + hooks (M20)
   - ReadmeTestTableParityTests -- "## 測試" table   vs  tools/tests/test_*.py (M21)
   - ReadmeCiParityTests        -- "## CI 對應" list  vs  CI workflow run-steps (M22)
+  - ReadmeCiTriggerParityTests -- "## CI 對應" intro trigger paths
+                                  vs  workflow on.push/pull_request paths (M30)
   - InstallParityTests         -- install.sh loop + README `ln -sf` block
                                   vs  tools/hooks/ scripts on disk (M24)
 
@@ -49,7 +51,12 @@ README = TOOLS / 'README.md'
 # identical (tool, long_flags) contract that locks workflow == build_steps.
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-from test_check_all import _step_signature, _workflow_run_commands  # noqa: E402
+from test_check_all import (  # noqa: E402
+    WORKFLOW,
+    _step_signature,
+    _workflow_run_commands,
+    _workflow_trigger_paths,
+)
 
 # A table data row whose first cell is a backticked `tools/...` path.
 _TOOL_ROW_RE = re.compile(r'^\|\s*`(tools/[^`]+)`\s*\|')
@@ -142,6 +149,68 @@ def _documented_ci_commands() -> list[str]:
         if m:
             cmds.append(m.group(1))
     return cmds
+
+
+# Any inline `code span` in a markdown section, used to harvest the trigger-path
+# tokens the README's "## CI 對應" intro cites in prose.
+_BACKTICK_SPAN_RE = re.compile(r'`([^`]+)`')
+
+
+def _display_trigger(tok: str) -> str | None:
+    """Normalize one path token to its user-facing trigger form, or None.
+
+    The workflow `paths:` list and the README "## CI 對應" intro are two
+    hand-written copies of the same trigger surface written in *different*
+    notations: the workflow uses globs (`**/*.ipynb`, `tools/**`) while the
+    README cites the user-friendly extension form (`.ipynb`, `tools/**`). This
+    maps both onto a single canonical display token so the two copies can be
+    compared deterministically:
+
+      - `**/*.ipynb` / `**/*.py`  -> `.ipynb` / `.py`  (strip the `**/*` glob)
+      - `tools/**` (and any `*/**`) -> itself
+      - a bare extension `.ipynb` / `.py`               -> itself
+
+    Everything else -- bare filenames (`check_all.py`), command words
+    (`python3`, `tools/tests`), the root arg `.`, and the workflow
+    self-reference path `.github/workflows/ipynb-py-sync.yml` -- returns None so
+    it is excluded from the trigger set on both sides. The self-reference path
+    is intentionally not part of the *user-facing* surface (the README cites the
+    workflow file as the subject of the sentence, not as a watched path), and
+    dropping it on both sides keeps the comparison honest.
+    """
+    if tok.startswith('**/*'):
+        return tok[len('**/*'):] or None
+    if tok.endswith('/**'):
+        return tok
+    if re.fullmatch(r'\.\w+', tok):
+        return tok
+    return None
+
+
+def _documented_ci_trigger_tokens() -> set[str]:
+    """Display-normalized trigger tokens cited in the README "## CI 對應" section.
+
+    Harvests every inline `code span` in the section, splits each on whitespace
+    (so a multi-word command span like `python3 -m unittest ...` contributes its
+    individual tokens), and keeps only those _display_trigger recognizes.
+    """
+    tokens: set[str] = set()
+    for span in _BACKTICK_SPAN_RE.findall('\n'.join(_ci_section())):
+        for tok in span.split():
+            disp = _display_trigger(tok)
+            if disp:
+                tokens.add(disp)
+    return tokens
+
+
+def _workflow_trigger_display() -> set[str]:
+    """Display-normalized trigger set from the workflow's push `paths:` list.
+
+    push == pull_request is already locked by M29's WorkflowTriggerParityTests,
+    so either copy is a valid source of truth; push is used here.
+    """
+    push = _workflow_trigger_paths().get('push', [])
+    return {d for d in (_display_trigger(p) for p in push) if d}
 
 
 INSTALL_SH = TOOLS / 'hooks' / 'install.sh'
@@ -377,6 +446,91 @@ class ReadmeCiParityTests(unittest.TestCase):
                         (REPO / tok).exists(),
                         f'README CI list names `{tok}` but it does not exist',
                     )
+
+
+class ReadmeCiTriggerParityTests(unittest.TestCase):
+    """The README "## CI 對應" intro must cite the workflow's trigger surface.
+
+    M22's ReadmeCiParityTests locks the README's *numbered run-step list*
+    against the workflow run-steps, and M29's WorkflowTriggerParityTests locks
+    the workflow's two `paths:` copies (push == pull_request == canonical). But
+    the README "## CI 對應" *intro sentence* is yet another hand-written copy of
+    the same trigger surface -- "在 push / PR 觸碰 `.ipynb` / `.py` / `tools/**`
+    時跑" -- that no test guards. Drop `tools/**` from the workflow paths (or add
+    a new trigger glob) and this prose silently rots, misleading anyone who
+    reads the doc to understand when CI fires. This is the same parity move as
+    M22 / M29, applied to the doc's trigger description: the README's cited
+    trigger tokens, display-normalized, must equal the workflow's. Via M29's
+    push == pull_request == canonical lock this transitively pins README ==
+    workflow == canonical for the trigger filter too.
+    """
+
+    def test_ci_section_cites_trigger_paths(self):
+        # Guards the narrow harvester: the section must cite at least one
+        # recognizable trigger token. A reword that drops every backticked path
+        # fails loudly so the harvester / regex gets revisited rather than
+        # silently comparing two empty sets (mirrors the *_shape guards above).
+        self.assertTrue(
+            _documented_ci_trigger_tokens(),
+            'CI 對應 intro cites no trigger paths; update _display_trigger / '
+            'the README prose',
+        )
+
+    def test_workflow_exposes_trigger_paths(self):
+        # Positive anchor: parity is only meaningful if the workflow side is
+        # non-empty too (M29 owns the deep structural checks).
+        self.assertTrue(
+            _workflow_trigger_display(),
+            'workflow declares no display-able trigger paths; '
+            'check _workflow_trigger_paths',
+        )
+
+    def test_documented_triggers_match_workflow(self):
+        # Core drift guard: README trigger tokens == workflow trigger surface.
+        doc = _documented_ci_trigger_tokens()
+        wf = _workflow_trigger_display()
+        self.assertEqual(
+            doc, wf,
+            'tools/README.md "## CI 對應" intro drifted from the CI workflow '
+            'trigger `paths:`.\n'
+            f'  README cites: {sorted(doc)}\n'
+            f'  workflow:     {sorted(wf)}\n'
+            'Update the "## CI 對應" intro sentence in tools/README.md and the '
+            'on.push/on.pull_request paths in .github/workflows/'
+            'ipynb-py-sync.yml together (M29 locks the two workflow copies).',
+        )
+
+    def test_notebook_and_py_globs_documented(self):
+        # The two artifact globs are the reason this CI exists; the doc must name
+        # both so a reader knows notebook+sibling changes trigger it.
+        doc = _documented_ci_trigger_tokens()
+        for tok in ('.ipynb', '.py'):
+            self.assertIn(
+                tok, doc,
+                f'README CI 對應 intro must cite the `{tok}` trigger',
+            )
+
+    def test_tools_dir_documented(self):
+        # Toolchain edits must (and the doc must say they) re-run CI.
+        self.assertIn(
+            'tools/**', _documented_ci_trigger_tokens(),
+            'README CI 對應 intro must cite the `tools/**` trigger',
+        )
+
+    def test_workflow_self_reference_not_user_facing(self):
+        # Documents the intentional asymmetry: the workflow watches its own file
+        # (M29 test_workflow_self_referenced_in_paths), but that is an internal
+        # detail, not part of the user-facing trigger surface -- so it is absent
+        # from both display sets. Guards against someone "fixing" the doc by
+        # listing the workflow path as a watched glob (which _display_trigger
+        # would then have to start surfacing).
+        self_ref = str(WORKFLOW.relative_to(REPO))
+        self.assertIsNone(
+            _display_trigger(self_ref),
+            f'{self_ref} should not normalize to a user-facing trigger token',
+        )
+        self.assertNotIn(self_ref, _documented_ci_trigger_tokens())
+        self.assertNotIn(self_ref, _workflow_trigger_display())
 
 
 class InstallParityTests(unittest.TestCase):

@@ -34,6 +34,7 @@
 - **M27** — pre-push hook「mirror CI steps 2-4」契約 parity guard：M23 的 `pre-push` hook 跑 `check_all.py --skip-tests`，讓 push 被 CI 的 artifact 檢查（step 2-4，跳過 unit tests）守門。但有兩個只靠慣例成立的不變量沒被守：(1) hook 指令**真的帶 `--skip-tests`**——整合測試 `PrePushHookTests` 雖然 end-to-end 跑 hook，卻只能**偶然**抓到 `--skip-tests` 被拿掉（其 fixture 沒有 `tools/tests/` 目錄，full check_all 的 `unittest discover -s tools/tests` 會丟 `ImportError` 而 rc≠0），這很脆弱：失敗訊息是含糊的「Start directory is not importable」、看不出真因是少了 flag，且若 fixture 哪天放了空的 `tools/tests/`，discover 找到 0 test 回 rc 0，drop 就漏網；(2) `build_steps(skip_tests=True)` == 「CI step 2-4」（hook docstring 的宣稱）== workflow run-steps 砍掉那一個 unit-test step——M18 只鎖了 full `build_steps == workflow`，沒人把 skip_tests 子集綁到 workflow。M27 依 M18 / M22 / M26 precedent 補 `tools/tests/test_check_all.py` 的 `PrePushParityTests`（7 個 test，純 stdlib）：純 regex + `shlex` 解析 hook 的 `check_all.py` 指令、斷言帶 `--skip-tests` 且不帶其他 long flag（文字層、像 M24 解析 `install.sh`）；並**復用** M18 的 `_step_signature` / `_workflow_run_commands` 斷言 skip_tests 恰好砍掉第一個（unit-test）step、其餘 2-4 與 workflow 砍掉 unittest 後逐一相符。關掉 hook 契約最後一份未被守的副本。不動 production code。
 - **M28** — `_sanitize_code` IPython-help 偵測精準化（修掉 latent code-corruption bug）：converter 一直用 naive `stripped.endswith('?')` 判斷 IPython suffix-help（`obj?` / `obj??`），但這會 false-positive 把任何結尾是 `?` 的**合法 Python 行**整行註解掉——`x = run()  # done?`（trailing-question comment）、triple-quoted string 內 prose 行 `Are you ready?`、甚至把已是註解的 `# really?` 變成 `# # really?`。最毒的是 converter 與 sync checker **共用** `_sanitize_code`，所以「valid code 被靜默註解掉」CI **抓不到**（重生與比對用同一條壞規則，byte-for-byte 永遠相符）。M28 把 `endswith('?')` 換成錨定 identifier/attribute/subscript/call chain 的 `_HELP_SUFFIX_RE`，只有「裸物件參照鏈 + 結尾 `?`/`??`」才算 help。**provably byte-for-byte 安全**：先掃過全 repo 確認 77 個 notebook 目前有 **0** 行 code cell 結尾是 `?` 而非 magic（該 branch 目前 comment 出 0 行），收緊規則零 regen。補 5 個 test 進 `SanitizeCodeTests` + 更新模組 docstring。動 converter（一行 + 一條 regex 常數），不動三支 checker / hook / CI workflow。
 - **M29** — CI workflow `paths:` trigger filter parity guard：M18 / M22 / M26 / M27 連續鎖死了 workflow 的 **run-steps**（CI 做什麼）對 `build_steps()` / README / docstring / pre-push 的一致性，但同一份 `ipynb-py-sync.yml` 還有一塊**完全沒被守**的手寫副本——`on.push.paths` 與 `on.pull_request.paths` 這對 trigger filter（決定「CI 到底跑不跑」）。它**手寫兩遍**：在 push 加一條路徑卻忘了 pull_request，push 與 PR build 就 silently 覆蓋不同檔案集；更危險的是手滑刪掉 `**/*.ipynb` 或 `tools/**`，CI 會**安靜地不再對它存在目的所要守的變更觸發**（這種「綠」比某個 step 紅更毒，因為根本沒跑）。M29 依 M18-M27 precedent 補 `tools/tests/test_check_all.py` 的 `WorkflowTriggerParityTests`（6 個 test，純 stdlib，無 PyYAML 因系統 Python PEP 668 鎖），新增 `_workflow_trigger_paths()` 縮排感知 line parser 抽出兩個 event 的 `paths:` list，斷言：(1) push paths == pull_request paths（兩份副本不准漂移）、(2) == canonical `_EXPECTED_TRIGGER_PATHS`（縮小 trigger surface 會紅）、(3) 兩個 artifact glob（`**/*.ipynb` / `**/*.py`）在、(4) `tools/**` 在、(5) workflow 自我參照路徑在（編譯出非硬編）。關掉 workflow 最後一份未被守的手寫副本。不動 production code。
+- **M30** — README「## CI 對應」intro trigger 描述 ↔ workflow `paths:` parity guard：M22 鎖了 README「## CI 對應」的 **numbered run-step list**（CI 做什麼）對 workflow run-steps、M29 鎖了 workflow 內部兩份 `paths:` 副本（push == pull_request == canonical），但同一段「## CI 對應」的 **intro 句子**還有**第三份手寫副本**——「在 push / PR 觸碰 `.ipynb` / `.py` / `tools/**` 時跑」這串 trigger surface 描述完全沒被守。改了 workflow 的 trigger `paths:`（拿掉 `tools/**`、加新 glob）卻忘了改 README intro，這份「文件版 CI 觸發條件」就 silently 腐爛，誤導讀文件的人對「CI 什麼時候跑」的理解。M30 依 M22 / M29 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiTriggerParityTests`（6 個 test，純 stdlib），新增 `_display_trigger()` 把 workflow glob（`**/*.ipynb`）與 README 副檔名寫法（`.ipynb`）normalize 成同一組 canonical display token，**復用** M29 的 `_workflow_trigger_paths()` 取 workflow 真理，斷言 README intro 引用的 trigger token 集合 == workflow 的 trigger surface。透過 M29 的 push == pull_request == canonical 互鎖，傳遞性保證 README == workflow == canonical。workflow 自我參照路徑刻意不屬於 user-facing surface（兩邊 display set 都排除），用一個 test 鎖住這個 intentional asymmetry。不動 production code。
 
 ## 進度日誌
 
@@ -1015,3 +1016,36 @@ python3 -m unittest tools.tests.test_check_all.WorkflowTriggerParityTests -v
 
 #### 副作用 / 注意
 - 若日後真要新增一條 trigger path（例如把 `.gitattributes` 納入觸發），記得同 commit 更新 `_EXPECTED_TRIGGER_PATHS`，並**兩個 event 都加**——這正是 M29 要鎖的不變量
+
+### M30 — README「## CI 對應」intro trigger 描述 ↔ workflow `paths:` parity guard
+- 為什麼補：parity-guard 主線到 M29 為止已把 workflow 的 **run-steps**（docstring == build_steps == workflow == README run-list + pre-push 子集，M18/M22/M26/M27）與 **trigger `paths:`**（push == pull_request == canonical，M29）兩條鏈都閉環了。但 `tools/README.md`「## CI 對應」段的 **intro 句子**——「`.github/workflows/ipynb-py-sync.yml` 在 push / PR 觸碰 `.ipynb` / `.py` / `tools/**` 時跑」——是 trigger surface 的**第三份手寫副本**，M22 只鎖了那段的 numbered run-list、M29 只鎖了 workflow 內部，這句 intro 一直沒人守。改了 workflow trigger（拿掉 `tools/**`、加新 glob）卻忘了改 README intro，這份「文件版 CI 觸發條件」就 silently 腐爛，讀文件的人對「CI 什麼時候跑」會被誤導
+- 為什麼這是 workflow 相關 parity 的下一個、也是最後一個明顯目標：run-step 鏈與 trigger 鏈各自閉環後，唯一還在「只靠慣例成立」的就是「README 用人話描述的 trigger」這份副本。M18-M29 的進度文反覆寫「關掉最後一份未被守的副本」，這就是 CI 對應段最後一份
+- 解法：依 M22 / M29 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiTriggerParityTests`（6 個 test，純 stdlib）：
+  - 新增 `_display_trigger(tok)` — 把兩種**不同記法**的 trigger 副本 normalize 成同一組 canonical display token：workflow 用 glob（`**/*.ipynb` / `**/*.py` / `tools/**`），README intro 用使用者友善的副檔名寫法（`.ipynb` / `.py` / `tools/**`）。規則：`**/*` 前綴砍掉 → `.ipynb`/`.py`；`*/**`（如 `tools/**`）原樣；裸副檔名 `\.\w+` 原樣；其餘（裸檔名 `check_all.py`、指令字 `python3` / `tools/tests`、root arg `.`、workflow 自我參照路徑）→ None
+  - 新增 `_documented_ci_trigger_tokens()` — harvest「## CI 對應」段所有 inline `` `code span` ``、各自按空白切 token（讓 `python3 -m unittest …` 這種多字指令 span 拆成個別 token）、過 `_display_trigger` 留下 trigger token 集合
+  - 新增 `_workflow_trigger_display()` — 取 M29 的 `_workflow_trigger_paths()['push']`（push == pull_request 由 M29 鎖死，取任一即真理）過同一個 `_display_trigger`
+  - 6 個 test：(1) README intro 有引用 trigger token（harvester shape guard）、(2) workflow 側非空（positive anchor）、(3) **README token 集合 == workflow trigger surface**（核心 drift guard）、(4) `.ipynb` + `.py` 兩個 artifact glob 在文件、(5) `tools/**` 在文件、(6) workflow 自我參照路徑**不**屬 user-facing surface（兩邊 display set 都排除，鎖住這個 intentional asymmetry，防止有人「修文件」時把 workflow 路徑當 watched glob 列上去）
+- 設計細節：
+  - 兩邊都過**同一個** `_display_trigger`，所以比對是 deterministic set equality，不靠 fuzzy 文字對映——避免「parity guard 建在脆弱文字假設上反而給假信心」。`check_all.py` / `tools/tests` / `.`（root arg）這些同段出現的 backtick token 都被 `_display_trigger` 明確排除（實測 README display set == `{.ipynb, .py, tools/**}`）
+  - 復用 M29 的 `_workflow_trigger_paths()`（從 `test_check_all` import，沿用既有 HERE-on-sys.path 的 import 形式，與 M22 復用 `_step_signature` / `_workflow_run_commands` 同款），不另寫一份 workflow parser
+  - 透過 M29 的 push == pull_request == canonical 互鎖，本 test 的 README == workflow 傳遞性閉環 README == workflow == canonical
+- 不動 production code：與 M18-M27 / M29 同——只新增 test（+ 一個 normalization helper + 兩個 harvester）。converter / 三支 checker / hook / CI workflow / README 本身 / `.gitattributes` 全部沒改；77 個 `.py` sibling 零變動（`git diff --stat` 只有 `test_readme.py` 一支）
+- 負向驗證（證明 guard 真的會咬，兩個方向）：
+  - monkeypatch `_documented_ci_trigger_tokens` 砍掉 `tools/**` → `test_documented_triggers_match_workflow` fail（README 漏列被抓）
+  - monkeypatch `_workflow_trigger_display` 多一條 `.md` → 同 test fail（workflow 加 trigger 但 README 沒跟上被抓）
+- 本地驗證：
+  - `python3 -m unittest tools.tests.test_readme.ReadmeCiTriggerParityTests -v` → `Ran 6 tests OK`
+  - `python3 tools/tests/test_readme.py` → `Ran 29 tests OK`（M24 後 23 + M30 6）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 216 tests OK`（M29 210 + M30 6）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+  - `git diff --stat` → 僅 `tools/tests/test_readme.py`，無 `.py` sibling 變動
+
+#### 用法
+```bash
+# 只跑 M30 新增的 class
+python3 -m unittest tools.tests.test_readme.ReadmeCiTriggerParityTests -v
+```
+
+#### 副作用 / 注意
+- 若日後新增一條 user-facing trigger path（例如 `.gitattributes` 真的納入觸發），M29 會要求更新 `_EXPECTED_TRIGGER_PATHS` + workflow 兩個 event，M30 會再要求**同 commit 更新 README intro 句子**——這正是 M30 要鎖的不變量（文件不准落後於 workflow）
+- `_display_trigger` 對「workflow 自我參照路徑」回 None 是刻意的：那是 CI 內部實作細節、非使用者要理解的觸發面。若日後決定要讓文件也明示「改 workflow 本身也會觸發 CI」，需同步放寬 `_display_trigger` 並翻轉 test 6
