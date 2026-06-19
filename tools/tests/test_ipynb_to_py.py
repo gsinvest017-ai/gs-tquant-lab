@@ -158,6 +158,67 @@ class SanitizeCodeTests(unittest.TestCase):
         # branch adds nothing -> 'x\n'.
         self.assertEqual(_sanitize_code('x = 1\n\n'), 'x = 1\n')
 
+    # --- M31: string-aware magic detection -------------------------------
+    # M28 anchored the help-SUFFIX rule so a trailing `?` in real code/prose is
+    # left alone. But the leading %/!/? detection was still purely line-based:
+    # a line INSIDE a triple-quoted string that happens to start with %/!/?
+    # (or look like a help chain) was silently commented out, corrupting the
+    # string body. Because the converter and sync checker share _sanitize_code,
+    # CI could never catch it (both sides apply the same broken rule, so the
+    # bytes always match). These guards lock the string-aware behavior in.
+
+    def test_bang_line_inside_triple_string_preserved(self):
+        # A line beginning with `!` inside a triple-quoted string is string
+        # content (e.g. shell snippets embedded in a docstring), NOT an IPython
+        # shell magic. It must pass through verbatim.
+        src = 'doc = """\n!run this in your shell\n"""'
+        self.assertEqual(
+            _sanitize_code(src),
+            'doc = """\n!run this in your shell\n"""\n',
+        )
+
+    def test_percent_line_inside_triple_string_preserved(self):
+        src = "tmpl = '''\n%(name)s formatting\n'''"
+        self.assertEqual(
+            _sanitize_code(src),
+            "tmpl = '''\n%(name)s formatting\n'''\n",
+        )
+
+    def test_help_chain_inside_triple_string_preserved(self):
+        # `df.head?` looks like IPython suffix-help, but inside a docstring it
+        # is prose and must not be commented.
+        src = 'note = """\ndf.head?\n"""'
+        self.assertEqual(
+            _sanitize_code(src),
+            'note = """\ndf.head?\n"""\n',
+        )
+
+    def test_real_magic_after_closed_triple_string_still_commented(self):
+        # Once the triple string closes, a genuine magic on a later line must
+        # still be commented — the string-awareness must not leak past the close.
+        src = 'doc = """\n!inside string\n"""\n!pip install foo'
+        self.assertEqual(
+            _sanitize_code(src),
+            'doc = """\n!inside string\n"""\n# !pip install foo\n',
+        )
+
+    def test_real_magic_before_triple_string_still_commented(self):
+        src = '!pip install foo\ndoc = """\n!inside string\n"""'
+        self.assertEqual(
+            _sanitize_code(src),
+            '# !pip install foo\ndoc = """\n!inside string\n"""\n',
+        )
+
+    def test_triple_quote_inside_normal_string_does_not_open_block(self):
+        # A `"""` appearing inside a normal single-quoted string is string
+        # content, not a triple-quote opener; the next line's real magic must
+        # still be commented (state must stay "outside").
+        src = "sep = '\"\"\"'\n!pip install foo"
+        self.assertEqual(
+            _sanitize_code(src),
+            "sep = '\"\"\"'\n# !pip install foo\n",
+        )
+
 
 class ConvertToStrTests(unittest.TestCase):
     def setUp(self):

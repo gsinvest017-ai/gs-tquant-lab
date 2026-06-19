@@ -7,7 +7,10 @@ reference chain ending in `?`/`??`, e.g. `df.head?`, or the `?obj` prefix form)
 are commented out so the .py is importable. The help-suffix match is anchored to
 an identifier/attribute/subscript/call chain (see _HELP_SUFFIX_RE) rather than a
 naive `endswith('?')`, so a legitimate line such as `x = run()  # done?` is left
-untouched instead of being silently turned into a comment.
+untouched instead of being silently turned into a comment. Magic detection is
+also string-aware (see _advance_string_state): a line that BEGINS inside a
+triple-quoted string is never treated as a magic, so embedding a shell snippet
+or `%`-template inside a docstring no longer corrupts the string body.
 
 By default a malformed notebook is reported to stderr but the batch continues
 and rc=0 if at least the loop completed; pass --strict to flip that into a
@@ -44,14 +47,61 @@ def _comment_block(text: str) -> str:
     return '\n'.join('# ' + ln if ln else '#' for ln in lines) + '\n'
 
 
+def _advance_string_state(line: str, state: str | None) -> str | None:
+    """Return the triple-quoted-string state in effect at the END of `line`.
+
+    `state` is None when not inside a triple-quoted string, otherwise the open
+    delimiter (``\"\"\"`` or ``'''``). Normal single/double-quoted strings and
+    ``#`` comments on the line are consumed so a triple-quote (or ``#``) sitting
+    inside them does not flip the state. This is a deliberately small scanner —
+    just enough to tell whether the NEXT line begins inside a triple-quoted
+    string, which is the only case where a leading %/!/? is string content
+    rather than an IPython magic.
+    """
+    i, n = 0, len(line)
+    while i < n:
+        if state is not None:
+            end = line.find(state, i)
+            if end == -1:
+                return state
+            i, state = end + 3, None
+            continue
+        if line.startswith('"""', i) or line.startswith("'''", i):
+            delim = line[i:i + 3]
+            end = line.find(delim, i + 3)
+            if end == -1:
+                return delim  # opens a triple string that runs past this line
+            i = end + 3
+            continue
+        ch = line[i]
+        if ch == '#':
+            return None  # comment runs to end of line
+        if ch in ('"', "'"):
+            j = i + 1
+            while j < n:
+                if line[j] == '\\':
+                    j += 2
+                    continue
+                if line[j] == ch:
+                    break
+                j += 1
+            i = j + 1
+            continue
+        i += 1
+    return state
+
+
 def _sanitize_code(text: str) -> str:
     out = []
+    state = None  # triple-quoted-string state across physical lines
     for ln in text.splitlines():
         stripped = ln.lstrip()
-        if stripped.startswith(('%', '!', '?')) or _HELP_SUFFIX_RE.match(stripped):
+        in_string = state is not None
+        if not in_string and (stripped.startswith(('%', '!', '?')) or _HELP_SUFFIX_RE.match(stripped)):
             out.append('# ' + ln)
         else:
             out.append(ln)
+        state = _advance_string_state(ln, state)
     return '\n'.join(out) + ('\n' if not text.endswith('\n') else '')
 
 
