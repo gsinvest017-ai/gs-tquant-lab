@@ -35,6 +35,7 @@
 - **M28** — `_sanitize_code` IPython-help 偵測精準化（修掉 latent code-corruption bug）：converter 一直用 naive `stripped.endswith('?')` 判斷 IPython suffix-help（`obj?` / `obj??`），但這會 false-positive 把任何結尾是 `?` 的**合法 Python 行**整行註解掉——`x = run()  # done?`（trailing-question comment）、triple-quoted string 內 prose 行 `Are you ready?`、甚至把已是註解的 `# really?` 變成 `# # really?`。最毒的是 converter 與 sync checker **共用** `_sanitize_code`，所以「valid code 被靜默註解掉」CI **抓不到**（重生與比對用同一條壞規則，byte-for-byte 永遠相符）。M28 把 `endswith('?')` 換成錨定 identifier/attribute/subscript/call chain 的 `_HELP_SUFFIX_RE`，只有「裸物件參照鏈 + 結尾 `?`/`??`」才算 help。**provably byte-for-byte 安全**：先掃過全 repo 確認 77 個 notebook 目前有 **0** 行 code cell 結尾是 `?` 而非 magic（該 branch 目前 comment 出 0 行），收緊規則零 regen。補 5 個 test 進 `SanitizeCodeTests` + 更新模組 docstring。動 converter（一行 + 一條 regex 常數），不動三支 checker / hook / CI workflow。
 - **M29** — CI workflow `paths:` trigger filter parity guard：M18 / M22 / M26 / M27 連續鎖死了 workflow 的 **run-steps**（CI 做什麼）對 `build_steps()` / README / docstring / pre-push 的一致性，但同一份 `ipynb-py-sync.yml` 還有一塊**完全沒被守**的手寫副本——`on.push.paths` 與 `on.pull_request.paths` 這對 trigger filter（決定「CI 到底跑不跑」）。它**手寫兩遍**：在 push 加一條路徑卻忘了 pull_request，push 與 PR build 就 silently 覆蓋不同檔案集；更危險的是手滑刪掉 `**/*.ipynb` 或 `tools/**`，CI 會**安靜地不再對它存在目的所要守的變更觸發**（這種「綠」比某個 step 紅更毒，因為根本沒跑）。M29 依 M18-M27 precedent 補 `tools/tests/test_check_all.py` 的 `WorkflowTriggerParityTests`（6 個 test，純 stdlib，無 PyYAML 因系統 Python PEP 668 鎖），新增 `_workflow_trigger_paths()` 縮排感知 line parser 抽出兩個 event 的 `paths:` list，斷言：(1) push paths == pull_request paths（兩份副本不准漂移）、(2) == canonical `_EXPECTED_TRIGGER_PATHS`（縮小 trigger surface 會紅）、(3) 兩個 artifact glob（`**/*.ipynb` / `**/*.py`）在、(4) `tools/**` 在、(5) workflow 自我參照路徑在（編譯出非硬編）。關掉 workflow 最後一份未被守的手寫副本。不動 production code。
 - **M30** — README「## CI 對應」intro trigger 描述 ↔ workflow `paths:` parity guard：M22 鎖了 README「## CI 對應」的 **numbered run-step list**（CI 做什麼）對 workflow run-steps、M29 鎖了 workflow 內部兩份 `paths:` 副本（push == pull_request == canonical），但同一段「## CI 對應」的 **intro 句子**還有**第三份手寫副本**——「在 push / PR 觸碰 `.ipynb` / `.py` / `tools/**` 時跑」這串 trigger surface 描述完全沒被守。改了 workflow 的 trigger `paths:`（拿掉 `tools/**`、加新 glob）卻忘了改 README intro，這份「文件版 CI 觸發條件」就 silently 腐爛，誤導讀文件的人對「CI 什麼時候跑」的理解。M30 依 M22 / M29 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiTriggerParityTests`（6 個 test，純 stdlib），新增 `_display_trigger()` 把 workflow glob（`**/*.ipynb`）與 README 副檔名寫法（`.ipynb`）normalize 成同一組 canonical display token，**復用** M29 的 `_workflow_trigger_paths()` 取 workflow 真理，斷言 README intro 引用的 trigger token 集合 == workflow 的 trigger surface。透過 M29 的 push == pull_request == canonical 互鎖，傳遞性保證 README == workflow == canonical。workflow 自我參照路徑刻意不屬於 user-facing surface（兩邊 display set 都排除），用一個 test 鎖住這個 intentional asymmetry。不動 production code。
+- **M31** — `_sanitize_code` 字串感知 magic 偵測（修掉 triple-quoted string 內 `!`/`%`/`?` 行被誤註解的 latent corruption bug）：M28 把 `?`-**suffix** help（`obj?` / `df.head?`）的偵測錨定到 reference chain，修掉「trailing `?` 的合法行被整行註解」這條 latent bug；但 **leading** `%`/`!`/`?` 的偵測一直是純逐行、不感知字串——一個 BEGIN 在 triple-quoted string 內、又恰好以 `%`/`!`/`?` 開頭（或長得像 help 鏈）的行，會被靜默註解掉、汙染字串內容（例：docstring 內嵌 shell 片段 `!run this`、`%`-template `%(name)s`、prose `df.head?`）。與 M28 同款最毒之處：converter 與 sync checker **共用** `_sanitize_code`，所以「字串內容被靜默註解」CI **抓不到**（重生與比對套同一條壞規則，byte-for-byte 永遠相符）。M31 新增 `_advance_string_state()` 逐行追蹤 triple-quote 狀態（會吃掉一般單/雙引號字串與 `#` 註解，避免其內的 `"""` 或 `#` 翻動狀態），`_sanitize_code` 只在 `state is None`（不在 triple string 內）時才判斷 magic。**provably byte-for-byte 安全**：對全 repo 77 個 notebook 跑 shipped function vs 舊逐行規則 diff 出 **0** 個 cell 差異，零 regen。補 6 個 test 進 `SanitizeCodeTests`（in-string `!`/`%`/help-chain 不註解、close 後真 magic 仍註解、open 前真 magic 仍註解、一般字串內的 `"""` 不誤開 block）+ 更新模組 docstring。動 converter（一個 helper + `_sanitize_code` 改用 state），不動三支 checker / hook / CI workflow。
 
 ## 進度日誌
 
@@ -1049,3 +1050,37 @@ python3 -m unittest tools.tests.test_readme.ReadmeCiTriggerParityTests -v
 #### 副作用 / 注意
 - 若日後新增一條 user-facing trigger path（例如 `.gitattributes` 真的納入觸發），M29 會要求更新 `_EXPECTED_TRIGGER_PATHS` + workflow 兩個 event，M30 會再要求**同 commit 更新 README intro 句子**——這正是 M30 要鎖的不變量（文件不准落後於 workflow）
 - `_display_trigger` 對「workflow 自我參照路徑」回 None 是刻意的：那是 CI 內部實作細節、非使用者要理解的觸發面。若日後決定要讓文件也明示「改 workflow 本身也會觸發 CI」，需同步放寬 `_display_trigger` 並翻轉 test 6
+
+### M31 — `_sanitize_code` 字串感知 magic 偵測（修掉 triple-quoted string 內 `!`/`%`/`?` 行被誤註解的 latent bug）
+- 為什麼補：M28 收緊了 `?`-**suffix** help（`obj?` / `df.head?`）的偵測、修掉 trailing-`?` 合法行被整行註解的 latent bug；但同一支 `_sanitize_code` 的 **leading** `%`/`!`/`?` 判斷仍是純逐行、完全不感知字串狀態。一個 BEGIN 在 triple-quoted string 內、又恰好以 `%`/`!`/`?` 開頭（或長得像 help 參照鏈）的行會被靜默註解掉，汙染字串內容：
+  - docstring / 多行字串內嵌 shell 片段：`"""\n!run this in your shell\n"""` → `!run...` 被改成 `# !run...`
+  - `%`-style 格式字串：`'''\n%(name)s\n'''` → `%(name)s` 被註解
+  - prose 行剛好像 help：`"""\ndf.head?\n"""` → 被當成 IPython suffix-help 註解
+- 為什麼 CI 抓不到（與 M28 同款最毒處）：converter（重生 `.py`）與 sync checker（byte-for-byte 比對）**共用** `_sanitize_code`。兩邊套同一條壞規則，輸出永遠相符，sync check 與 converted check 都綠——「字串內容被靜默改寫」對所有現有守門員都是隱形的
+- 解法：
+  - 新增 `_advance_string_state(line, state)`：逐行回傳「行尾」的 triple-quote 狀態（`None` 或開啟的 delimiter `"""` / `'''`）。掃描時會吃掉一般單/雙引號字串（含 `\` escape）與 `#` 註解，避免它們內部的 `"""` 或 `#` 誤翻狀態。刻意做小——只需判斷「下一行是否 BEGIN 在 triple string 內」，那正是 leading `%`/`!`/`?` 屬於字串內容而非 magic 的唯一情境
+  - `_sanitize_code` 改成跨行帶 `state`：只有 `state is None`（不在 triple string 內）時才套既有 magic 判斷（`startswith(('%','!','?'))` 或 `_HELP_SUFFIX_RE`），每行結束更新 `state`
+- **provably byte-for-byte 安全（零 regen）**：在 production function 就位後，對全 repo 77 個 notebook 的所有 code cell 跑「shipped `_sanitize_code` vs 舊逐行規則」diff → **0** 個 cell 不同。沿用 M28「先證明收緊規則對現有 77 檔零影響」的方法論，所以 77 個 `.py` sibling 完全不動（`git diff --stat` 僅 `tools/ipynb_to_py.py` + `tools/tests/test_ipynb_to_py.py`）
+- 在 `tools/tests/test_ipynb_to_py.py` 的 `SanitizeCodeTests` 補 6 個 case：
+  - `test_bang_line_inside_triple_string_preserved` — `"""` 內 `!...` 行原樣保留
+  - `test_percent_line_inside_triple_string_preserved` — `'''` 內 `%(name)s` 行原樣保留
+  - `test_help_chain_inside_triple_string_preserved` — `"""` 內 `df.head?` 不當 help 註解
+  - `test_real_magic_after_closed_triple_string_still_commented` — triple 關閉後的真 magic 仍註解（state 不外漏）
+  - `test_real_magic_before_triple_string_still_commented` — triple 開啟前的真 magic 仍註解
+  - `test_triple_quote_inside_normal_string_does_not_open_block` — 一般單引號字串內的 `"""` 不誤開 triple block，下一行真 magic 仍註解
+- 不動其他元件：sync checker / converted-py validator / pre-commit hook / pre-push hook / CI workflow / README / `.gitattributes` 全部沒改。只動 converter（一個 helper + `_sanitize_code` 改用 state）+ 測試 + 模組 docstring
+- 本地驗證：
+  - `python3 -m unittest tools.tests.test_ipynb_to_py.SanitizeCodeTests` → `Ran 23 tests OK`（M28 後 17 + M31 6）
+  - 零 regen proof script（shipped vs 舊規則跑 77 notebook）→ `0` cell 差異
+  - `python3 -m unittest discover -s tools/tests` → `Ran 222 tests OK`（M30 216 + M31 6）
+  - `python3 tools/check_all.py --quiet` → 4 steps 全 PASS、exit 0
+  - `git diff --stat`（commit 前）→ 僅 `tools/ipynb_to_py.py` + `tools/tests/test_ipynb_to_py.py`，無 `.py` sibling 變動
+
+#### 用法
+```bash
+# 只跑 M31 相關 class
+python3 -m unittest tools.tests.test_ipynb_to_py.SanitizeCodeTests -v
+```
+
+#### 副作用 / 注意
+- `_advance_string_state` 是「足夠用」而非完整 Python tokenizer：它不處理 f-string 內的 `{...}` 巢狀、行接續 `\`、或 `"""` 與 `#` 在極端混用下的所有組合。但它的職責很窄（判斷「下一行是否在 triple string 內」），且零-regen proof 已證明對現有全 repo 行為與舊規則完全一致；若日後某 notebook 觸發到未涵蓋的 edge case，sync check 會以 DRIFT 形式紅出來（不會像舊 bug 那樣靜默），屆時再補 tokenizer 級處理即可
