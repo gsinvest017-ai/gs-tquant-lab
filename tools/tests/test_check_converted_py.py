@@ -198,6 +198,40 @@ class MagicCheckTests(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertEqual(len(hits[0][1]), 120)
 
+    # --- M32: string-aware magic sniff (parity with the M31 converter fix) ---
+    # The converter preserves a leading !/%/? line verbatim when it begins
+    # inside a triple-quoted string; this validator must not re-flag it.
+
+    def test_bang_line_inside_triple_string_not_flagged(self) -> None:
+        py = _touch(self.root / 'doc_bang.py', 'x = """\n!run this in your shell\n"""\ny = 1\n')
+        self.assertEqual(_magic_check(py), [])
+
+    def test_percent_line_inside_triple_string_not_flagged(self) -> None:
+        py = _touch(self.root / 'doc_pct.py', "s = '''\n%(name)s\n'''\n")
+        self.assertEqual(_magic_check(py), [])
+
+    def test_question_line_inside_triple_string_not_flagged(self) -> None:
+        py = _touch(self.root / 'doc_q.py', 'x = """\n?help text\n"""\n')
+        self.assertEqual(_magic_check(py), [])
+
+    def test_real_magic_after_closed_triple_string_still_flagged(self) -> None:
+        """State must not leak past the closing delimiter."""
+        py = _touch(self.root / 'after.py', 'x = """\nok\n"""\n!ls\n')
+        hits = _magic_check(py)
+        self.assertEqual([h[0] for h in hits], [4])
+
+    def test_real_magic_before_triple_string_still_flagged(self) -> None:
+        py = _touch(self.root / 'before.py', '!ls\nx = """\nok\n"""\n')
+        hits = _magic_check(py)
+        self.assertEqual([h[0] for h in hits], [1])
+
+    def test_triple_quote_inside_normal_string_does_not_open_block(self) -> None:
+        """A '\"\"\"' inside a normal single-quoted string must not open a block,
+        so a real magic on the next line is still flagged."""
+        py = _touch(self.root / 'normal.py', "x = '\"\"\"'\n!ls\n")
+        hits = _magic_check(py)
+        self.assertEqual([h[0] for h in hits], [2])
+
 
 class MainTests(unittest.TestCase):
     """End-to-end on the helper-level main(), with stdout/stderr captured."""

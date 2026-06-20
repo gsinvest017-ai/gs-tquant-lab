@@ -7,6 +7,14 @@ Two checks, stdlib-only:
 2. Magic sniff — scans for lines starting with ``!``, ``%`` or ``?`` that
    the converter should have commented out.
 
+The magic sniff is string-aware: a line that BEGINS inside a triple-quoted
+string is never a leaked magic, it is string content the converter
+deliberately preserves verbatim (see ipynb_to_py._advance_string_state). It
+reuses the converter's own string scanner so a docstring such as
+``\"\"\"\\n!run this\\n%(name)s\\n\"\"\"`` is not falsely flagged — without
+this, the converter (string-aware since the M31 fix) and this validator would
+disagree, turning a correct conversion into a red CI build.
+
 Exit code 0 iff every paired .py passes both checks. Designed to be run
 in CI after ``tools/ipynb_to_py.py``.
 """
@@ -19,6 +27,12 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+from ipynb_to_py import _advance_string_state  # noqa: E402
 
 
 MAGIC_RE = re.compile(r'^(!|%|\?)')
@@ -55,10 +69,11 @@ def _compile_check(py: Path) -> str | None:
 def _magic_check(py: Path) -> list[tuple[int, str]]:
     hits: list[tuple[int, str]] = []
     text = py.read_text(encoding='utf-8', errors='replace')
+    state = None  # triple-quoted-string state across physical lines
     for i, line in enumerate(text.splitlines(), 1):
-        stripped = line.lstrip()
-        if MAGIC_RE.match(stripped):
+        if state is None and MAGIC_RE.match(line.lstrip()):
             hits.append((i, line[:120]))
+        state = _advance_string_state(line, state)
     return hits
 
 
