@@ -37,6 +37,7 @@
 - **M30** — README「## CI 對應」intro trigger 描述 ↔ workflow `paths:` parity guard：M22 鎖了 README「## CI 對應」的 **numbered run-step list**（CI 做什麼）對 workflow run-steps、M29 鎖了 workflow 內部兩份 `paths:` 副本（push == pull_request == canonical），但同一段「## CI 對應」的 **intro 句子**還有**第三份手寫副本**——「在 push / PR 觸碰 `.ipynb` / `.py` / `tools/**` 時跑」這串 trigger surface 描述完全沒被守。改了 workflow 的 trigger `paths:`（拿掉 `tools/**`、加新 glob）卻忘了改 README intro，這份「文件版 CI 觸發條件」就 silently 腐爛，誤導讀文件的人對「CI 什麼時候跑」的理解。M30 依 M22 / M29 precedent 補 `tools/tests/test_readme.py` 的 `ReadmeCiTriggerParityTests`（6 個 test，純 stdlib），新增 `_display_trigger()` 把 workflow glob（`**/*.ipynb`）與 README 副檔名寫法（`.ipynb`）normalize 成同一組 canonical display token，**復用** M29 的 `_workflow_trigger_paths()` 取 workflow 真理，斷言 README intro 引用的 trigger token 集合 == workflow 的 trigger surface。透過 M29 的 push == pull_request == canonical 互鎖，傳遞性保證 README == workflow == canonical。workflow 自我參照路徑刻意不屬於 user-facing surface（兩邊 display set 都排除），用一個 test 鎖住這個 intentional asymmetry。不動 production code。
 - **M31** — `_sanitize_code` 字串感知 magic 偵測（修掉 triple-quoted string 內 `!`/`%`/`?` 行被誤註解的 latent corruption bug）：M28 把 `?`-**suffix** help（`obj?` / `df.head?`）的偵測錨定到 reference chain，修掉「trailing `?` 的合法行被整行註解」這條 latent bug；但 **leading** `%`/`!`/`?` 的偵測一直是純逐行、不感知字串——一個 BEGIN 在 triple-quoted string 內、又恰好以 `%`/`!`/`?` 開頭（或長得像 help 鏈）的行，會被靜默註解掉、汙染字串內容（例：docstring 內嵌 shell 片段 `!run this`、`%`-template `%(name)s`、prose `df.head?`）。與 M28 同款最毒之處：converter 與 sync checker **共用** `_sanitize_code`，所以「字串內容被靜默註解」CI **抓不到**（重生與比對套同一條壞規則，byte-for-byte 永遠相符）。M31 新增 `_advance_string_state()` 逐行追蹤 triple-quote 狀態（會吃掉一般單/雙引號字串與 `#` 註解，避免其內的 `"""` 或 `#` 翻動狀態），`_sanitize_code` 只在 `state is None`（不在 triple string 內）時才判斷 magic。**provably byte-for-byte 安全**：對全 repo 77 個 notebook 跑 shipped function vs 舊逐行規則 diff 出 **0** 個 cell 差異，零 regen。補 6 個 test 進 `SanitizeCodeTests`（in-string `!`/`%`/help-chain 不註解、close 後真 magic 仍註解、open 前真 magic 仍註解、一般字串內的 `"""` 不誤開 block）+ 更新模組 docstring。動 converter（一個 helper + `_sanitize_code` 改用 state），不動三支 checker / hook / CI workflow。
 - **M32** — `check_converted_py._magic_check` 字串感知化（修掉 M31 留下的 validator 端 latent false-positive bug）：M31 把 converter 的 magic 偵測改成 string-aware，所以 triple-quoted string 內以 `!`/`%`/`?` 開頭的行（docstring 內嵌 shell 片段 `!run this`、`%`-template `%(name)s`、prose `?help`）會被**正確保留 verbatim**；converter 與 sync checker 共用 `_sanitize_code` 所以兩邊一致。**但** `check_converted_py.py` 的 `_magic_check` 是**第三支獨立**重寫的 magic 偵測（純逐行 `MAGIC_RE.match(lstrip)`，完全不感知字串），M31 沒碰它——於是「converter 正確保留的 in-string magic 行」會被 validator 當成 magic leak 報出來，CI 紅。這是與 M28 / M31 同款的 latent bug，只是換到 validator：兩支工具對「什麼是 magic」現在不一致。實測（probe）：一個 docstring 內含 `!run this` / `%(name)s` 的 notebook，converter 產出合法 `.py`（py_compile 過），但 `check_converted_py` 報 2 個 magic leak、exit 2。M32 讓 `_magic_check` **復用** converter 的 `_advance_string_state`（HERE-on-sys.path import，同 sync checker 復用 `convert_to_str` 的形式），只在 `state is None`（不在 triple string 內）時才套 `MAGIC_RE`。**provably 零行為變動**：對全 repo 77 個 paired `.py` 跑 old naive scan vs new string-aware scan，兩者各 flag **0** 行、**0** 檔差異（M31 已證明目前無 in-string magic 行），CI 維持綠、真正的 top-level leak 仍被抓。補 6 個 test 進 `MagicCheckTests`（in-string `!`/`%`/`?` 不報、close 後真 leak 仍報、open 前真 leak 仍報、一般字串內 `"""` 不誤開 block）+ 更新模組 docstring。動 validator（一個 import + `_magic_check` 改用 state），不動 converter / sync checker / hook / CI workflow / README / `.gitattributes`。
+- **M33** — magic-line predicate 收斂成單一真理來源 `_is_magic_line`（消掉第三份獨立定義 + 關掉 suffix-help leak 偵測不對稱）：M28/M31/M32 把 magic 偵測逐步改成 string-aware，但「**什麼算 magic 行**」這個文字判定仍被**獨立重寫三次**——converter `_sanitize_code` 用 `startswith(('%','!','?'))` ＋ `_HELP_SUFFIX_RE`、validator `_magic_check` 用**另一條** `MAGIC_RE = ^(!|%|\?)`。兩者共享 leading-char 集合卻各寫各的，沒有任何東西強制同步；更關鍵的是它們**對 suffix-help 不一致**：converter 會把 `df.head?` 註解掉，但 validator 的 `MAGIC_RE`（只認行首 `!`/`%`/`?`）**無法把漏網的 suffix-help 命名為 magic leak**，只能靠 py_compile 丟一個含糊的 `SyntaxError`（M32 進度文末把這個不對稱記為「刻意保留」，M33 把它關掉）。M33 依 M6（`convert_to_str` 單一來源）/ M32（validator 復用 `_advance_string_state`）precedent，把判定抽成 converter 的純函式 `_is_magic_line(stripped)`（leading `%`/`!`/`?` **或** `_HELP_SUFFIX_RE`），`_sanitize_code` 改用它（布林等價、**零行為變動**）；validator `import _is_magic_line` 取代 `MAGIC_RE.match`（並刪掉 `MAGIC_RE` 與不再用到的 `import re`）。string-awareness 仍由各 caller 的 `state is None` gate 負責，`_is_magic_line` 純粹是文字判定。**provably 零行為變動**：先 probe 全 repo 確認 77 個生成 `.py` 在頂層（state=None）有 **0** 行 leading-magic、**0** 行 suffix-help（兩種 leak 都不存在），收斂後 converter 重生 0 drift、validator 仍 77 OK / 0 leak。新增的偵測能力：漏網的 `df.head?` 現在會被 validator 報成 magic leak（而非 cryptic SyntaxError）。改 converter test import + 把 `MagicRegexTests`(6) 翻成 `MagicPredicateTests`(8，含 suffix-help now-magic / trailing-`?`-comment 不誤判)、`MagicCheckTests` +2（leaked suffix-help 被報、in-string suffix-help 不報）、`test_ipynb_to_py.py` +5（`IsMagicLineTests`，含「predicate ↔ `_sanitize_code` comment-out branch 互鎖」）。動 converter（+1 helper、`_sanitize_code` 一行）＋ validator（import + 一行 + 刪 `MAGIC_RE`/`re`）＋ docstring ＋ README test-table 描述；不動 sync checker / hook / CI workflow / `.gitattributes`。
 
 ## 進度日誌
 
@@ -1117,3 +1118,42 @@ python3 -m unittest tools.tests.test_check_converted_py.MagicCheckTests -v
 #### 副作用 / 注意
 - 現在 toolchain 三支 magic 偵測中有兩支（converter `_sanitize_code`、validator `_magic_check`）都已 string-aware 且共用 `_advance_string_state`；唯一差別是 converter 還多了 `_HELP_SUFFIX_RE`（suffix-help `df.head?`），validator 的 `MAGIC_RE` 只認 leading `!`/`%`/`?`——這是刻意的：validator 只需擋住「漏網的、會讓 `.py` 無法 compile 的 magic」，而 leading magic 才會造成 SyntaxError；suffix-help `df.head?` 在頂層也是 SyntaxError，但會以 `?` 結尾而非開頭，py_compile 那關仍會擋下，故 validator 不重複偵測
 - 與 M31 的 `_advance_string_state` 共用同一個「足夠用而非完整 tokenizer」限制；但職責同樣很窄、且零-行為-變動 proof 已鎖住現有 repo，未涵蓋的 edge case 會以 compile failure / DRIFT 形式紅出來而非靜默
+
+### M33 — magic-line predicate 收斂成單一 `_is_magic_line`（消第三份定義 + 關 suffix-help 偵測不對稱）
+- 為什麼補：M28/M31/M32 把 magic 偵測逐步改成 string-aware，但「什麼算 magic 行」這個**文字判定**到 M32 為止仍被獨立重寫三次：
+  - converter `_sanitize_code` — `stripped.startswith(('%','!','?'))` **或** `_HELP_SUFFIX_RE.match(stripped)`（後者是 M28 加的 suffix-help `df.head?`）
+  - validator `check_converted_py._magic_check` — **另一條** `MAGIC_RE = re.compile(r'^(!|%|\?)')`，只認行首三字
+  - sync checker 不算第三份（它復用 `convert_to_str` → `_sanitize_code`）
+  兩支真理（converter / validator）共享 leading-char 集合 `{!,%,?}` 卻各寫各的，沒有任何東西強制同步——改了一邊忘了另一邊就 silently 漂移。
+- 更關鍵的不對稱：M32 進度文末「副作用/注意」**自己記下**——converter 會把 `df.head?` 註解掉，但 validator 的 `MAGIC_RE`（只認行首）**無法把漏網的 suffix-help 命名為 magic leak**，只能靠 py_compile 丟含糊的 `SyntaxError`，並把這標為「刻意保留」。這正是技術債訊號（M11/M13/M15 的「known limitation locked into note」precedent）。M33 把它關掉。
+- 解法（依 M6 `convert_to_str` 單一來源 / M32 validator 復用 `_advance_string_state` 的同款「不重寫、用 import」形式）：
+  - converter 新增純函式 `_is_magic_line(stripped) -> bool`：`stripped.startswith(('%','!','?')) or bool(_HELP_SUFFIX_RE.match(stripped))`。`_sanitize_code` 改用它——與原 inline 條件**布林等價**，converter 零行為變動。
+  - validator 改 `from ipynb_to_py import _advance_string_state, _is_magic_line`，`_magic_check` 把 `MAGIC_RE.match(line.lstrip())` 換成 `_is_magic_line(line.lstrip())`，刪掉 `MAGIC_RE` 與不再用到的 `import re`。
+  - string-awareness 仍由各 caller 的 `state is None` / `not in_string` gate 負責；`_is_magic_line` 純粹是「這行文字像不像 magic」，刻意 line-only。
+- **provably 零行為變動 proof**：先 probe 全 repo 77 個生成 `.py`，逐行帶 `_advance_string_state`，數頂層（state=None）行——leading-magic（A）= **0**、suffix-help（B，原 `MAGIC_RE` 抓不到那塊）= **0**。所以收斂後：
+  - converter 重生全 repo → **0 drift**（zero-regen）
+  - validator → 仍 `77 OK / 0 magic leak`
+  - 新增的偵測能力：日後若有人手改生成 `.py` 留下頂層 `df.head?`，validator 現在報成「Magic-line leak」（精準訊息）而非 cryptic SyntaxError。
+- 也順手實證 `df.head?` 在純 Python 是 SyntaxError（確認改動前 py_compile 是 suffix-help 的唯一守門）。
+- 測試（共 +9，228 → 237）：
+  - `test_check_converted_py.py`：import 去 `MAGIC_RE`、加 `from ipynb_to_py import _is_magic_line`；`MagicRegexTests`(6) → `MagicPredicateTests`(8)（新增 suffix-help now-magic、trailing-`?`-comment `x = run()  # done?` 不誤判）；`MagicCheckTests` +2（leaked `df.head?` 被報含 lineno、in-string `df.head?` 不報）
+  - `test_ipynb_to_py.py`：+`IsMagicLineTests`(5)，含「whatever predicate calls magic, `_sanitize_code` 就 comment-out；反之亦然」的互鎖 test，把 converter 兩個用點綁在一起防漂移
+- 影響面：動 converter（+1 helper、`_sanitize_code` 一行、docstring）＋ validator（import + 一行 + 刪 `MAGIC_RE`/`re`、docstring）＋ `tools/README.md` 測試表描述一行；**不動** sync checker / hook（pre-commit / pre-push）/ CI workflow / `.gitattributes`。
+- 本地驗證：
+  - `python3 -m unittest discover -s tools/tests` → `Ran 237 tests OK`
+  - converter zero-regen proof → `77 files, 0 drift`
+  - `python3 tools/check_converted_py.py --quiet` → 77 OK、0 leak、exit 0
+  - `python3 tools/check_ipynb_py_sync.py --quiet` → 77/77 in sync、0 orphan、exit 0
+  - `python3 tools/ipynb_to_py.py --strict --dry-run .` → rc=0
+  - `python3 tools/check_all.py` → All 4 steps passed、rc=0
+
+#### 用法
+```bash
+# 只跑 M33 相關 test
+python3 -m unittest tools.tests.test_check_converted_py.MagicPredicateTests
+python3 -m unittest tools.tests.test_ipynb_to_py.IsMagicLineTests
+```
+
+#### 副作用 / 注意
+- `_is_magic_line` 現在是 converter 與 validator 共用的單一真理；之後要動「什麼算 magic」只改這一處，兩支自動同步（互鎖 test 會擋住只改一邊的漂移）。
+- M32 進度文末標為「刻意保留」的 validator-不偵測-suffix-help 不對稱，於 M33 正式關閉；該段歷史說明保留不動以利對照演進。

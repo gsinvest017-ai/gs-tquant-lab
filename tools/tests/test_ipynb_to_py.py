@@ -30,6 +30,7 @@ from ipynb_to_py import (  # noqa: E402
     CELL_SEP,
     HEADER,
     _comment_block,
+    _is_magic_line,
     _sanitize_code,
     convert_to_str,
     main,
@@ -218,6 +219,41 @@ class SanitizeCodeTests(unittest.TestCase):
             _sanitize_code(src),
             "sep = '\"\"\"'\n# !pip install foo\n",
         )
+
+
+class IsMagicLineTests(unittest.TestCase):
+    """Pin the shared textual predicate (M33).
+
+    _is_magic_line is the single source of truth reused by the validator's
+    leak detector; it must match _sanitize_code's own comment-out branch and
+    must NOT regress the M28 trailing-? guard. String-awareness is the
+    caller's job, so this predicate is intentionally line-only.
+    """
+
+    def test_leading_magics_are_magic(self):
+        for s in ('!ls', '%matplotlib inline', '%%time', '?obj'):
+            self.assertTrue(_is_magic_line(s), s)
+
+    def test_suffix_help_is_magic(self):
+        for s in ('df.head?', 'obj??', 'a.b.c[0]?', 'foo()?'):
+            self.assertTrue(_is_magic_line(s), s)
+
+    def test_plain_code_is_not_magic(self):
+        for s in ('import os', 'x = 1', '', 'return df.head()'):
+            self.assertFalse(_is_magic_line(s), s)
+
+    def test_trailing_question_comment_is_not_magic(self):
+        self.assertFalse(_is_magic_line('x = run()  # done?'))
+
+    def test_matches_sanitize_comment_out_branch(self):
+        """Whatever the predicate calls magic, _sanitize_code comments out
+        (when not in a string) — and vice versa. Guards the two from drifting."""
+        magic = ['!ls', '%time', '?obj', 'df.head?', 'obj??']
+        plain = ['import os', 'x = 1', 'y = f()  # ok?']
+        for s in magic:
+            self.assertEqual(_sanitize_code(s), '# ' + s + '\n', s)
+        for s in plain:
+            self.assertEqual(_sanitize_code(s), s + '\n', s)
 
 
 class ConvertToStrTests(unittest.TestCase):

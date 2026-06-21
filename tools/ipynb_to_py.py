@@ -12,6 +12,10 @@ also string-aware (see _advance_string_state): a line that BEGINS inside a
 triple-quoted string is never treated as a magic, so embedding a shell snippet
 or `%`-template inside a docstring no longer corrupts the string body.
 
+The textual "is this a magic line" test lives in one place, _is_magic_line,
+which the validator (check_converted_py) imports and reuses so the converter
+and the leak detector cannot drift apart on what counts as a magic.
+
 By default a malformed notebook is reported to stderr but the batch continues
 and rc=0 if at least the loop completed; pass --strict to flip that into a
 hard failure (rc=1) so CI catches corrupted notebooks instead of silently
@@ -40,6 +44,20 @@ CELL_SEP = '# %% [{kind}] cell {idx}\n'
 # trailing-question comment (`run()  # ok?`) or a spaced expression — out of the
 # comment-out branch, so valid code is never silently dropped.
 _HELP_SUFFIX_RE = re.compile(r'^[A-Za-z_][\w.]*(?:\[[^\]]*\]|\([^)]*\))*\?{1,2}$')
+
+
+def _is_magic_line(stripped: str) -> bool:
+    """Whether an already-lstripped line is an IPython magic / help line.
+
+    The single source of truth for "what is a magic line", shared by the
+    converter's _sanitize_code (which comments such lines out) and the
+    validator's check_converted_py._magic_check (which flags any that leaked
+    through uncommented). Keeping one predicate stops the two tools drifting:
+    a line is magic if it begins with %/!/? (line, cell or prefix-help magic)
+    OR is a bare reference chain ending in ?/?? (suffix help, e.g. df.head?).
+    Callers decide string-awareness; this is purely the textual predicate.
+    """
+    return stripped.startswith(('%', '!', '?')) or bool(_HELP_SUFFIX_RE.match(stripped))
 
 
 def _comment_block(text: str) -> str:
@@ -97,7 +115,7 @@ def _sanitize_code(text: str) -> str:
     for ln in text.splitlines():
         stripped = ln.lstrip()
         in_string = state is not None
-        if not in_string and (stripped.startswith(('%', '!', '?')) or _HELP_SUFFIX_RE.match(stripped)):
+        if not in_string and _is_magic_line(stripped):
             out.append('# ' + ln)
         else:
             out.append(ln)

@@ -102,7 +102,7 @@ python3 -m unittest tools.tests.test_check_all.WorkflowParityTests
 |---------|----------|
 | `tools/tests/test_ipynb_to_py.py` | converter helper + `main()` CLI（含 `--strict` / `--dry-run`） |
 | `tools/tests/test_check_ipynb_py_sync.py` | sync checker `main()` / `_pairs` / `_diff_preview` / `_orphan_py` + `.gitattributes` parity |
-| `tools/tests/test_check_converted_py.py` | validator `MAGIC_RE` / `_paired_py_files` / `_compile_check` / `_magic_check` / `main()` |
+| `tools/tests/test_check_converted_py.py` | validator 共用的 `_is_magic_line` predicate / `_paired_py_files` / `_compile_check` / `_magic_check` / `main()` |
 | `tools/tests/test_pre_commit_hook.py` | hooks（pre-commit / pre-push）+ `install.sh`（每 test 起自有 temp git repo 跑真實 hook） |
 | `tools/tests/test_check_all.py` | aggregate runner + CI workflow parity guard |
 | `tools/tests/test_readme.py` | 本 README 的 tool 清單 ↔ 實際 `tools/` 檔案 parity guard |

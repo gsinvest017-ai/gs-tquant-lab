@@ -27,12 +27,12 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from check_converted_py import (  # noqa: E402
-    MAGIC_RE,
     _compile_check,
     _magic_check,
     _paired_py_files,
     main,
 )
+from ipynb_to_py import _is_magic_line  # noqa: E402
 
 
 def _touch(path: Path, content: str = '') -> Path:
@@ -46,28 +46,45 @@ def _nb(path: Path) -> Path:
     return _touch(path, json.dumps(nb))
 
 
-class MagicRegexTests(unittest.TestCase):
-    """Pin the MAGIC_RE shape — sync checker shares the convention."""
+class MagicPredicateTests(unittest.TestCase):
+    """Pin the shared magic predicate (M33).
+
+    The validator no longer carries its own ``MAGIC_RE``; it reuses the
+    converter's ``ipynb_to_py._is_magic_line`` so the two tools cannot
+    disagree on what counts as a magic. These cases lock the predicate the
+    leak detector now uses.
+    """
 
     def test_bang_matches(self) -> None:
-        self.assertIsNotNone(MAGIC_RE.match('!ls'))
+        self.assertTrue(_is_magic_line('!ls'))
 
     def test_percent_matches(self) -> None:
-        self.assertIsNotNone(MAGIC_RE.match('%matplotlib inline'))
+        self.assertTrue(_is_magic_line('%matplotlib inline'))
 
     def test_double_percent_matches(self) -> None:
-        self.assertIsNotNone(MAGIC_RE.match('%%time'))
+        self.assertTrue(_is_magic_line('%%time'))
 
-    def test_question_matches(self) -> None:
-        self.assertIsNotNone(MAGIC_RE.match('?help'))
+    def test_prefix_question_matches(self) -> None:
+        self.assertTrue(_is_magic_line('?help'))
+
+    def test_suffix_help_now_matches(self) -> None:
+        """The closed asymmetry: a bare reference chain ending in ?/?? is
+        magic. The old ``^[!%?]`` regex could not name this leak."""
+        self.assertTrue(_is_magic_line('df.head?'))
+        self.assertTrue(_is_magic_line('obj??'))
+        self.assertTrue(_is_magic_line('a.b.c[0]?'))
+
+    def test_trailing_question_comment_not_magic(self) -> None:
+        """M28 guard preserved: real code that merely ends in ? stays code."""
+        self.assertFalse(_is_magic_line('x = run()  # done?'))
 
     def test_hash_bang_does_not_match(self) -> None:
         """Commented magics ('# !ls') must not trip the leak detector."""
-        self.assertIsNone(MAGIC_RE.match('# !ls'))
+        self.assertFalse(_is_magic_line('# !ls'))
 
     def test_plain_code_does_not_match(self) -> None:
-        self.assertIsNone(MAGIC_RE.match('import os'))
-        self.assertIsNone(MAGIC_RE.match(''))
+        self.assertFalse(_is_magic_line('import os'))
+        self.assertFalse(_is_magic_line(''))
 
 
 class PairedPyFilesTests(unittest.TestCase):
@@ -231,6 +248,23 @@ class MagicCheckTests(unittest.TestCase):
         py = _touch(self.root / 'normal.py', "x = '\"\"\"'\n!ls\n")
         hits = _magic_check(py)
         self.assertEqual([h[0] for h in hits], [2])
+
+    # --- M33: validator reuses the converter predicate, so a leaked
+    # suffix-help line is now named as a magic leak (not just a cryptic
+    # py_compile SyntaxError), while staying string-aware. ---
+
+    def test_leaked_suffix_help_now_flagged(self) -> None:
+        py = _touch(self.root / 'sufx.py', 'import os\ndf.head?\n')
+        hits = _magic_check(py)
+        self.assertEqual(len(hits), 1)
+        lineno, content = hits[0]
+        self.assertEqual(lineno, 2)
+        self.assertIn('df.head?', content)
+
+    def test_suffix_help_inside_triple_string_not_flagged(self) -> None:
+        """A suffix-help-looking line that is string content stays clean."""
+        py = _touch(self.root / 'sufx_doc.py', 'x = """\ndf.head?\n"""\ny = 1\n')
+        self.assertEqual(_magic_check(py), [])
 
 
 class MainTests(unittest.TestCase):
