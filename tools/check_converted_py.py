@@ -24,7 +24,10 @@ that could not name a leaked suffix-help line — it only surfaced as a cryptic
 guarantees the two tools never disagree on what counts as a magic.
 
 Exit code 0 iff every paired .py passes both checks. Designed to be run
-in CI after ``tools/ipynb_to_py.py``.
+in CI after ``tools/ipynb_to_py.py``. The ``OK`` summary count is the number
+of *distinct* passing pairs: a file that fails both checks (a leaked
+top-level magic is simultaneously a ``py_compile`` error and a magic leak)
+is counted once, so ``ok`` can never go negative.
 """
 from __future__ import annotations
 
@@ -109,7 +112,12 @@ def main(argv: list[str] | None = None) -> int:
             magic_fail.append((py, magics))
 
     total = len(pairs)
-    bad = len(missing) + len(compile_fail) + len(magic_fail)
+    # A single .py can fail BOTH checks (a leaked top-level `!ls` is both a
+    # py_compile SyntaxError and a magic leak), so count distinct failing
+    # files — summing the three lists would double-count and drive `ok`
+    # negative.
+    failed_py = {py for py, _ in compile_fail} | {py for py, _ in magic_fail}
+    bad = len(missing) + len(failed_py)
     ok = total - bad
 
     print(f'Checked {total} ipynb/py pairs under {root}')

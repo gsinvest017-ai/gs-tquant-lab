@@ -39,6 +39,7 @@
 - **M32** — `check_converted_py._magic_check` 字串感知化（修掉 M31 留下的 validator 端 latent false-positive bug）：M31 把 converter 的 magic 偵測改成 string-aware，所以 triple-quoted string 內以 `!`/`%`/`?` 開頭的行（docstring 內嵌 shell 片段 `!run this`、`%`-template `%(name)s`、prose `?help`）會被**正確保留 verbatim**；converter 與 sync checker 共用 `_sanitize_code` 所以兩邊一致。**但** `check_converted_py.py` 的 `_magic_check` 是**第三支獨立**重寫的 magic 偵測（純逐行 `MAGIC_RE.match(lstrip)`，完全不感知字串），M31 沒碰它——於是「converter 正確保留的 in-string magic 行」會被 validator 當成 magic leak 報出來，CI 紅。這是與 M28 / M31 同款的 latent bug，只是換到 validator：兩支工具對「什麼是 magic」現在不一致。實測（probe）：一個 docstring 內含 `!run this` / `%(name)s` 的 notebook，converter 產出合法 `.py`（py_compile 過），但 `check_converted_py` 報 2 個 magic leak、exit 2。M32 讓 `_magic_check` **復用** converter 的 `_advance_string_state`（HERE-on-sys.path import，同 sync checker 復用 `convert_to_str` 的形式），只在 `state is None`（不在 triple string 內）時才套 `MAGIC_RE`。**provably 零行為變動**：對全 repo 77 個 paired `.py` 跑 old naive scan vs new string-aware scan，兩者各 flag **0** 行、**0** 檔差異（M31 已證明目前無 in-string magic 行），CI 維持綠、真正的 top-level leak 仍被抓。補 6 個 test 進 `MagicCheckTests`（in-string `!`/`%`/`?` 不報、close 後真 leak 仍報、open 前真 leak 仍報、一般字串內 `"""` 不誤開 block）+ 更新模組 docstring。動 validator（一個 import + `_magic_check` 改用 state），不動 converter / sync checker / hook / CI workflow / README / `.gitattributes`。
 - **M33** — magic-line predicate 收斂成單一真理來源 `_is_magic_line`（消掉第三份獨立定義 + 關掉 suffix-help leak 偵測不對稱）：M28/M31/M32 把 magic 偵測逐步改成 string-aware，但「**什麼算 magic 行**」這個文字判定仍被**獨立重寫三次**——converter `_sanitize_code` 用 `startswith(('%','!','?'))` ＋ `_HELP_SUFFIX_RE`、validator `_magic_check` 用**另一條** `MAGIC_RE = ^(!|%|\?)`。兩者共享 leading-char 集合卻各寫各的，沒有任何東西強制同步；更關鍵的是它們**對 suffix-help 不一致**：converter 會把 `df.head?` 註解掉，但 validator 的 `MAGIC_RE`（只認行首 `!`/`%`/`?`）**無法把漏網的 suffix-help 命名為 magic leak**，只能靠 py_compile 丟一個含糊的 `SyntaxError`（M32 進度文末把這個不對稱記為「刻意保留」，M33 把它關掉）。M33 依 M6（`convert_to_str` 單一來源）/ M32（validator 復用 `_advance_string_state`）precedent，把判定抽成 converter 的純函式 `_is_magic_line(stripped)`（leading `%`/`!`/`?` **或** `_HELP_SUFFIX_RE`），`_sanitize_code` 改用它（布林等價、**零行為變動**）；validator `import _is_magic_line` 取代 `MAGIC_RE.match`（並刪掉 `MAGIC_RE` 與不再用到的 `import re`）。string-awareness 仍由各 caller 的 `state is None` gate 負責，`_is_magic_line` 純粹是文字判定。**provably 零行為變動**：先 probe 全 repo 確認 77 個生成 `.py` 在頂層（state=None）有 **0** 行 leading-magic、**0** 行 suffix-help（兩種 leak 都不存在），收斂後 converter 重生 0 drift、validator 仍 77 OK / 0 leak。新增的偵測能力：漏網的 `df.head?` 現在會被 validator 報成 magic leak（而非 cryptic SyntaxError）。改 converter test import + 把 `MagicRegexTests`(6) 翻成 `MagicPredicateTests`(8，含 suffix-help now-magic / trailing-`?`-comment 不誤判)、`MagicCheckTests` +2（leaked suffix-help 被報、in-string suffix-help 不報）、`test_ipynb_to_py.py` +5（`IsMagicLineTests`，含「predicate ↔ `_sanitize_code` comment-out branch 互鎖」）。動 converter（+1 helper、`_sanitize_code` 一行）＋ validator（import + 一行 + 刪 `MAGIC_RE`/`re`）＋ docstring ＋ README test-table 描述；不動 sync checker / hook / CI workflow / `.gitattributes`。
 - **M34** — string-aware magic-scan 行為 parity guard（converter `_sanitize_code` ↔ validator `_magic_check` 的掃描迴圈鎖死）：M32 讓兩支工具共用字串掃描器 `_advance_string_state`、M33 讓它們共用文字判定 `_is_magic_line`，但「**逐行追蹤 triple-quote state + 只在 top-level（`state is None`）才套 predicate**」這段**string-aware 掃描迴圈**仍被**獨立重寫兩遍**——converter 的 `_sanitize_code`（決定哪些行要註解掉）與 validator 的 `_magic_check`（決定哪些 magic 漏網）。兩個迴圈內嵌同一條不變量卻沒有任何東西強制它們對同一輸入標記**同一組行號**：日後若有人重構任一迴圈的 gating（例如把 `in_string` 改成在 advance **之後**才算、或放寬 `state is None` gate），兩支會 silently 漂移，而 CI 抓不到（production 中兩支從不看同一份原始文字——converter 與 sync checker 共用 `_sanitize_code`，validator 只掃已註解好的 `.py`，magic 早就是 `# ...`）。M34 依 M25（discovery 行為 parity）precedent，用**行為 parity** 而非 text parsing 關掉這個 gap：補 `tools/tests/test_magic_scan_parity.py` 的 `MagicScanParityTests`（16 個 test，純 stdlib），在同一段原始碼上跑**兩支真實掃描迴圈**，斷言 converter 註解掉的行號集合 == validator flag 的行號集合，且都 == 釘死的 expected（後者擋住「兩支以相同方向一起壞、彼此仍相等」的 shared bug）。fixture 涵蓋 no-magic / trailing-`?`-comment / leading `!`/`%`/`%%`/`?` / indented / suffix-help `df.head?` / `obj??` / in-string magic（`"""` 與 `'''`）/ close 後真 magic / open 前真 magic / 單行 open-close 後 magic / 綜合 torture case。helper `_converter_commented` 額外斷言 converter 的唯一 transform 永遠是 `'# '` 前綴（parity 論證的前提）。並依 M21 precedent 補 README「## 測試」表一列（`ReadmeTestTableParityTests` 守）。**不動 production code**——converter / validator / sync checker / hook / CI workflow / `.gitattributes` 全部沒改，純測試 + 文件。
+- **M35** — `check_converted_py.main()` 的 `ok` 計數修掉 double-count latent bug：validator 的 summary 行 `OK: N` 一直用 `bad = len(missing) + len(compile_fail) + len(magic_fail)` 算壞數，但一個 `.py` 可能**同時**進 `compile_fail` 與 `magic_fail`——漏網的頂層 magic（如 `!ls`）既是 `py_compile` SyntaxError、又是 magic leak，於是同一檔被計兩次，`ok = total - bad` 被低估、單檔情境甚至印出 `OK: -1`（probe 實證）。exit code 仍正確（2），但 summary 誤導讀者。M35 依 M28/M31/M32 latent-bug-fix precedent，把 `bad` 改成「distinct 失敗檔數」（`failed_py = {compile_fail 的 py} | {magic_fail 的 py}`，missing 因走 `continue` 與兩者互斥），`ok` 永不為負。**零行為變動於正常 repo**（全 77 對無任何 leak，三個失敗 list 皆空，新舊算法同得 `OK: 77`）；只在「`.py` 被手改/漂移成雙重失敗」時修正計數。補 3 個 test 進 `MainTests`（單檔雙失敗 → `OK: 0`、clean+雙失敗 mix → `OK: 1`、雙失敗仍印 COMPILE+MAGIC 兩行）。動 validator（`main()` 計數 3 行 + docstring）+ 測試；不動 converter / sync checker / hook / CI workflow / README / `.gitattributes`，無 `.py` sibling regen。
 
 ## 進度日誌
 
@@ -1182,4 +1183,44 @@ python3 -m unittest tools.tests.test_ipynb_to_py.IsMagicLineTests
 # 只跑 M34 新增的 parity guard
 python3 tools/tests/test_magic_scan_parity.py -v
 python3 -m unittest tools.tests.test_magic_scan_parity.MagicScanParityTests
+```
+
+### M35 — `check_converted_py.main()` `ok` 計數 double-count 修復
+- 為什麼補：toolchain 的 latent-bug 修復鏈（M28 trailing-`?` 誤殺、M31 in-string magic 誤註解、M32 validator false-positive）之後，validator 的 summary **計數邏輯**本身還藏一個 double-count bug。`main()` 用
+  ```python
+  bad = len(missing) + len(compile_fail) + len(magic_fail)
+  ok  = total - bad
+  ```
+  算總壞數，但 `compile_fail`（py_compile 失敗）與 `magic_fail`（magic leak）**不是互斥集合**——一個漏網的頂層 magic（`!ls`、`%matplotlib`、頂層 `df.head?`）**同時**滿足兩者，於是同一檔被加進 `bad` 兩次，`ok` 被低估。`missing` 因為走 `continue`、不會再跑 compile/magic，與另兩者互斥，所以只有 compile×magic 這對會重疊。
+- Probe 實證（修前）：temp tree 放一個 code cell `x=1` 的 `Bad.ipynb` + 手寫 `Bad.py` 內容為頂層 `!ls`（模擬 drift / hand-edit）→
+  ```
+  Checked 1 ipynb/py pairs
+    OK:                  -1      ← 明顯錯誤
+    py_compile failures: 1
+    Magic-line leaks:    1
+  ```
+  exit code 仍正確是 2，但 `OK: -1` 是壞掉的 summary。
+- 解法（依 M28/M31/M32 latent-bug-fix precedent，最小面積）：把 `bad` 改成「**distinct 失敗檔數**」——
+  ```python
+  failed_py = {py for py, _ in compile_fail} | {py for py, _ in magic_fail}
+  bad = len(missing) + len(failed_py)
+  ```
+  同一檔不論失敗幾項都只算一次，`ok = total - bad` 永不為負。per-file 診斷輸出（COMPILE / MAGIC 各印一行）刻意保留不變——counting 收斂不該吃掉任一診斷。
+- **零行為變動於正常 repo**：全 77 對 `.py` 目前 0 missing / 0 compile-fail / 0 magic-leak，三個 list 皆空，新舊算法同得 `OK: 77`、exit 0。修正只在「`.py` 被手改/漂移成雙重失敗」這種異常路徑顯現（把 `OK: -1` 變回 `OK: 0`）。
+- 既有 `test_magic_leak_returns_two` 其實早就用了 `!ls`（同款雙失敗檔），卻只斷言 `rc==2`、從沒檢查 `OK` 計數，所以 bug 一路漏網——M35 補上計數斷言這層。
+- 補 3 個 test 進 `MainTests`：
+  - `test_double_failing_file_counted_once` — 單一 `!ls` 檔 → `OK: 0`（非 `-1`）、`py_compile failures: 1`、`Magic-line leaks: 1`、rc=2
+  - `test_ok_count_with_clean_and_double_failing_mix` — 一個 clean pair + 一個雙失敗 pair → `OK: 1`、rc=2
+  - `test_double_failing_file_lists_both_diagnostics` — 雙失敗檔的 COMPILE 與 MAGIC 兩行都還在（計數收斂不抑制診斷）
+- 影響面：動 validator（`main()` 計數 3 行 + 模組 docstring 一段）＋ `tools/tests/test_check_converted_py.py`（+3 test）；**不動** converter / sync checker / hook（pre-commit／pre-push）/ CI workflow / README / `.gitattributes`，`git diff --stat` 僅兩檔、無任何 `.py` sibling regen。
+- 本地驗證：
+  - probe（修後）→ 同一雙失敗 tree 現在 `OK: 0`、exit 2；clean+雙失敗 mix → `OK: 1`
+  - `python3 -m unittest tools.tests.test_check_converted_py.MainTests -v` → `Ran 9 tests OK`（原 6 + M35 3）
+  - `python3 -m unittest discover -s tools/tests` → `Ran 256 tests OK`（253 + M35 3）
+  - `python3 tools/check_all.py` → All 4 steps passed、rc=0（77/77 in sync、0 orphan、0 leak、`OK: 77`）
+
+#### 用法
+```bash
+# 只跑 M35 相關 test
+python3 -m unittest tools.tests.test_check_converted_py.MainTests
 ```

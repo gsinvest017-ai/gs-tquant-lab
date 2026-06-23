@@ -325,6 +325,40 @@ class MainTests(unittest.TestCase):
         self.assertNotIn('MISSING:', stdout)
         self.assertIn('Missing .py sibling: 1', stdout)
 
+    # --- M35: a file failing BOTH checks must be counted once, so the OK
+    # count never goes negative (summing the three failure lists used to
+    # double-count and print OK: -1). ---
+
+    def test_double_failing_file_counted_once(self) -> None:
+        """A leaked top-level !ls is both a compile error and a magic leak;
+        the single bad pair must yield OK: 0, not OK: -1."""
+        _nb(self.root / 'Magic.ipynb')
+        _touch(self.root / 'Magic.py', '!ls\n')
+        rc, stdout, _ = self._run('--quiet')
+        self.assertEqual(rc, 2)
+        self.assertIn('OK:                  0', stdout)
+        self.assertIn('py_compile failures: 1', stdout)
+        self.assertIn('Magic-line leaks:    1', stdout)
+
+    def test_ok_count_with_clean_and_double_failing_mix(self) -> None:
+        """One clean pair + one double-failing pair → exactly one OK."""
+        _nb(self.root / 'Good.ipynb')
+        _touch(self.root / 'Good.py', 'x = 1\n')
+        _nb(self.root / 'Bad.ipynb')
+        _touch(self.root / 'Bad.py', '!ls\n')
+        rc, stdout, _ = self._run('--quiet')
+        self.assertEqual(rc, 2)
+        self.assertIn('OK:                  1', stdout)
+
+    def test_double_failing_file_lists_both_diagnostics(self) -> None:
+        """Counting once must not suppress either per-file diagnostic line."""
+        _nb(self.root / 'Magic.ipynb')
+        _touch(self.root / 'Magic.py', '!ls\n')
+        rc, stdout, _ = self._run()
+        self.assertEqual(rc, 2)
+        self.assertIn('COMPILE:', stdout)
+        self.assertIn('MAGIC:', stdout)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
