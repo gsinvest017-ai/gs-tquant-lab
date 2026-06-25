@@ -24,20 +24,23 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from ipynb_to_py import convert_to_str  # noqa: E402
+from ipynb_to_py import convert_to_str, _SKIP_DIR_PARTS, _in_skipped_dir  # noqa: E402
 
 
 # Directories whose .py files are hand-written, not generated from notebooks.
 # Anything under these prefixes is exempt from orphan-detection.
 _HANDWRITTEN_DIR_PARTS = ('tools',)
-# Directories that should be skipped entirely during the walk.
-_SKIP_DIR_PARTS = ('.git', '.github', '.ipynb_checkpoints', '__pycache__', '.venv', 'venv')
+# The set of non-source directories to skip (_SKIP_DIR_PARTS) and the predicate
+# (_in_skipped_dir) are imported from the converter so notebook discovery here
+# enumerates exactly the same set as the converter root-walk and the validator
+# (M36: previously this walk filtered only '.ipynb_checkpoints' while
+# _orphan_py skipped the broader set, an asymmetry the shared constant closes).
 
 
 def _pairs(root: Path) -> list[tuple[Path, Path]]:
     out = []
     for nb in root.rglob('*.ipynb'):
-        if '.ipynb_checkpoints' in nb.parts:
+        if _in_skipped_dir(nb):
             continue
         out.append((nb, nb.with_suffix('.py')))
     return sorted(out)

@@ -106,7 +106,7 @@ python3 -m unittest tools.tests.test_check_all.WorkflowParityTests
 | `tools/tests/test_pre_commit_hook.py` | hooks（pre-commit / pre-push）+ `install.sh`（每 test 起自有 temp git repo 跑真實 hook） |
 | `tools/tests/test_check_all.py` | aggregate runner + CI workflow parity guard |
 | `tools/tests/test_readme.py` | 本 README 的 tool 清單 ↔ 實際 `tools/` 檔案 parity guard |
-| `tools/tests/test_discovery_parity.py` | 三支工具的 notebook-discovery 行為 parity（converter / sync / validator 枚舉同一組 `.ipynb`） |
+| `tools/tests/test_discovery_parity.py` | 三支工具的 notebook-discovery 行為 parity（converter / sync / validator 枚舉同一組 `.ipynb`）＋ 共用 `_SKIP_DIR_PARTS` 跳過 `.venv` / `__pycache__` 等非源碼目錄 |
 | `tools/tests/test_magic_scan_parity.py` | converter `_sanitize_code` ↔ validator `_magic_check` 的 string-aware magic 掃描行為 parity（同一段原始碼，兩支掃描迴圈標記同一組 magic 行號） |
 
 ## 失敗時怎麼修

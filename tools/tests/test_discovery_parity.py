@@ -24,6 +24,15 @@ on one shared fixture tree (root nb, nested nb, plus root-level and nested
 ``.ipynb_checkpoints/`` notebooks that must be excluded) and assert the
 discovered notebook sets are identical. Pure stdlib; no production change.
 
+M36 broadened the shared filter: the three walks now skip the full
+``ipynb_to_py._SKIP_DIR_PARTS`` set (``.git``, ``.github``,
+``.ipynb_checkpoints``, ``__pycache__``, ``.venv``, ``venv``) via the shared
+``_in_skipped_dir`` predicate, not just ``.ipynb_checkpoints``. Before M36 a
+notebook bundled under ``.venv/`` was discovered and spuriously converted by
+all three walks, while ``_orphan_py`` already skipped it -- an asymmetry the
+shared constant closes. ``SkipDirParityTests`` extends the behavioral parity
+to every skip dir and pins the canonical set.
+
 Run:
     python3 tools/tests/test_discovery_parity.py
     # or
@@ -46,8 +55,11 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import ipynb_to_py  # noqa: E402
+from ipynb_to_py import _SKIP_DIR_PARTS  # noqa: E402
 from check_converted_py import _paired_py_files  # noqa: E402
 from check_ipynb_py_sync import _pairs  # noqa: E402
+from check_ipynb_py_sync import _SKIP_DIR_PARTS as _SYNC_SKIP_DIR_PARTS  # noqa: E402
+from check_converted_py import _in_skipped_dir as _VAL_IN_SKIPPED  # noqa: E402
 
 # Matches the converter's --dry-run line: "[dry] <rel> -> <rel_py>".
 _DRY_RE = re.compile(r'^\[dry\] (.+?) -> ')
@@ -187,6 +199,91 @@ class NotebookDiscoveryParityTests(unittest.TestCase):
             self.assertEqual(_converter_discovers(root), set())
             self.assertEqual(_pairs_discovers(root), set())
             self.assertEqual(_validator_discovers(root), set())
+
+
+class SkipDirParityTests(unittest.TestCase):
+    """All three discovery walks must skip the full _SKIP_DIR_PARTS set (M36).
+
+    Before M36 each walk filtered only '.ipynb_checkpoints', so a notebook
+    bundled under .venv/ (etc.) was discovered and spuriously converted while
+    _orphan_py already skipped it. These tests lock the broadened filter as a
+    behavioral parity: a notebook placed under every skip dir must be invisible
+    to all three real discovery paths, and the three must still agree.
+    """
+
+    # The skip dirs that can realistically contain a stray .ipynb (a package
+    # shipped under .venv, a stale checkpoint, etc.). All come from the one
+    # shared constant; we assert against that constant, not a hard-coded copy.
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        _write_nb(self.root / 'real.ipynb')
+        _write_nb(self.root / 'pkg' / 'nested.ipynb')
+        # One bundled notebook under each skip dir (root-level and nested).
+        for sd in _SKIP_DIR_PARTS:
+            _write_nb(self.root / sd / 'bundled.ipynb')
+            _write_nb(self.root / 'pkg' / sd / 'deep_bundled.ipynb')
+        self.expected = {'real.ipynb', 'pkg/nested.ipynb'}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_skip_dir_notebooks_excluded_by_all_three(self):
+        self.assertEqual(_converter_discovers(self.root), self.expected)
+        self.assertEqual(_pairs_discovers(self.root), self.expected)
+        self.assertEqual(_validator_discovers(self.root), self.expected)
+
+    def test_all_three_agree_with_skip_dirs_present(self):
+        conv = _converter_discovers(self.root)
+        pairs = _pairs_discovers(self.root)
+        val = _validator_discovers(self.root)
+        self.assertEqual(conv, pairs, 'converter vs sync-checker diverged on skip dirs')
+        self.assertEqual(pairs, val, 'sync-checker vs validator diverged on skip dirs')
+
+    def test_fixture_actually_contains_skip_dir_notebooks(self):
+        # Negative control: raw rglob must see far more than the 2 real ones,
+        # else the exclusion assertion above would pass vacuously.
+        raw = {p.relative_to(self.root).as_posix() for p in self.root.rglob('*.ipynb')}
+        # 2 real + 2 per skip dir.
+        self.assertEqual(len(raw), 2 + 2 * len(_SKIP_DIR_PARTS))
+        self.assertTrue(any('.venv/' in r for r in raw))
+
+    def test_each_skip_dir_individually_excluded(self):
+        # Pin each skip dir on its own so a future edit that drops one from the
+        # set (e.g. removes '__pycache__') is caught, not masked by the others.
+        for sd in _SKIP_DIR_PARTS:
+            with self.subTest(skip_dir=sd):
+                with tempfile.TemporaryDirectory() as d:
+                    root = Path(d).resolve()
+                    _write_nb(root / 'keep.ipynb')
+                    _write_nb(root / sd / 'drop.ipynb')
+                    self.assertEqual(_converter_discovers(root), {'keep.ipynb'})
+                    self.assertEqual(_pairs_discovers(root), {'keep.ipynb'})
+                    self.assertEqual(_validator_discovers(root), {'keep.ipynb'})
+
+
+class SkipDirConstantParityTests(unittest.TestCase):
+    """The skip-dir constant must be the single shared object across modules."""
+
+    def test_sync_reuses_converter_constant(self):
+        # check_ipynb_py_sync imports _SKIP_DIR_PARTS from the converter rather
+        # than re-declaring it (M36 removed the 4th independent copy).
+        self.assertIs(_SYNC_SKIP_DIR_PARTS, _SKIP_DIR_PARTS)
+
+    def test_validator_reuses_converter_predicate(self):
+        self.assertIs(_VAL_IN_SKIPPED, ipynb_to_py._in_skipped_dir)
+
+    def test_canonical_skip_dir_set(self):
+        # Pin the exact set so widening/narrowing the discovery surface is a
+        # deliberate, reviewed change rather than a silent drift.
+        self.assertEqual(
+            set(_SKIP_DIR_PARTS),
+            {'.git', '.github', '.ipynb_checkpoints', '__pycache__', '.venv', 'venv'},
+        )
+
+    def test_checkpoints_still_in_set(self):
+        # The pre-M36 behavior (filter .ipynb_checkpoints) must remain a subset.
+        self.assertIn('.ipynb_checkpoints', _SKIP_DIR_PARTS)
 
 
 if __name__ == '__main__':

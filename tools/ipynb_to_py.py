@@ -16,6 +16,12 @@ The textual "is this a magic line" test lives in one place, _is_magic_line,
 which the validator (check_converted_py) imports and reuses so the converter
 and the leak detector cannot drift apart on what counts as a magic.
 
+Likewise the set of directories every discovery walk must skip lives in one
+place, _SKIP_DIR_PARTS (with the _in_skipped_dir predicate). The converter
+root-walk, the sync checker and the validator all reuse it, so a notebook
+bundled under .venv/ or __pycache__ is never spuriously converted by one tool
+yet ignored by another.
+
 By default a malformed notebook is reported to stderr but the batch continues
 and rc=0 if at least the loop completed; pass --strict to flip that into a
 hard failure (rc=1) so CI catches corrupted notebooks instead of silently
@@ -37,6 +43,25 @@ from pathlib import Path
 
 HEADER = '# -*- coding: utf-8 -*-\n# Auto-generated from {src} by tools/ipynb_to_py.py\n# Do not edit by hand; re-run the converter to regenerate.\n\n'
 CELL_SEP = '# %% [{kind}] cell {idx}\n'
+
+# Directories that are never part of the repo's notebook/source tree. The single
+# source of truth for "skip this directory", shared by every notebook-discovery
+# walk (the converter root-walk below, check_ipynb_py_sync._pairs and
+# check_converted_py._paired_py_files) AND by check_ipynb_py_sync._orphan_py.
+# Before M36 the three discovery walks each filtered only '.ipynb_checkpoints',
+# so a notebook bundled under .venv/ (e.g. shipped by an installed package) or
+# left in __pycache__/.git would be silently discovered and converted, while
+# _orphan_py already skipped exactly this set -- an asymmetry one constant closes.
+_SKIP_DIR_PARTS = ('.git', '.github', '.ipynb_checkpoints', '__pycache__', '.venv', 'venv')
+
+
+def _in_skipped_dir(path: Path) -> bool:
+    """True if any component of `path` is a non-source dir we must skip.
+
+    Matches on path components (like the pre-M36 ``'.ipynb_checkpoints' in
+    p.parts`` check and ``_orphan_py``), so it works at any nesting depth.
+    """
+    return any(part in _SKIP_DIR_PARTS for part in path.parts)
 
 # IPython suffix-help syntax: a bare object reference chain (identifier, dotted
 # attributes, subscripts, calls) terminated by `?` or `??`. Matching this rather
@@ -168,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         base = Path.cwd().resolve()
     else:
         base = Path(args.root).resolve()
-        notebooks = sorted(p for p in base.rglob('*.ipynb') if '.ipynb_checkpoints' not in p.parts)
+        notebooks = sorted(p for p in base.rglob('*.ipynb') if not _in_skipped_dir(p))
         if not notebooks:
             print(f'No .ipynb under {base}', file=sys.stderr)
             return 1

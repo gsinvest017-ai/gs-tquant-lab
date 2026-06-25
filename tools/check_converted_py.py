@@ -42,13 +42,13 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from ipynb_to_py import _advance_string_state, _is_magic_line  # noqa: E402
+from ipynb_to_py import _advance_string_state, _in_skipped_dir, _is_magic_line  # noqa: E402
 
 
 def _paired_py_files(root: Path) -> list[tuple[Path, Path]]:
     pairs = []
     for nb in root.rglob('*.ipynb'):
-        if '.ipynb_checkpoints' in nb.parts:
+        if _in_skipped_dir(nb):
             continue
         py = nb.with_suffix('.py')
         pairs.append((nb, py))
