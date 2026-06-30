@@ -30,11 +30,16 @@ from ipynb_to_py import convert_to_str, _SKIP_DIR_PARTS, _in_skipped_dir  # noqa
 # Directories whose .py files are hand-written, not generated from notebooks.
 # Anything under these prefixes is exempt from orphan-detection.
 _HANDWRITTEN_DIR_PARTS = ('tools',)
-# The set of non-source directories to skip (_SKIP_DIR_PARTS) and the predicate
-# (_in_skipped_dir) are imported from the converter so notebook discovery here
-# enumerates exactly the same set as the converter root-walk and the validator
+# The predicate _in_skipped_dir (and the constant _SKIP_DIR_PARTS it is built
+# from) are imported from the converter so notebook discovery here enumerates
+# exactly the same set as the converter root-walk and the validator
 # (M36: previously this walk filtered only '.ipynb_checkpoints' while
 # _orphan_py skipped the broader set, an asymmetry the shared constant closes).
+# Both walks here -- _pairs and _orphan_py -- call _in_skipped_dir rather than
+# re-inlining `any(part in _SKIP_DIR_PARTS ...)` (M37 converged the last inline
+# copy in _orphan_py). _SKIP_DIR_PARTS itself is re-exported (and asserted to be
+# the converter's object by the discovery parity tests) but no longer scanned
+# directly in this module.
 
 
 def _pairs(root: Path) -> list[tuple[Path, Path]]:
@@ -54,10 +59,9 @@ def _orphan_py(root: Path) -> list[Path]:
     """
     out: list[Path] = []
     for py in root.rglob('*.py'):
-        parts = py.parts
-        if any(part in _SKIP_DIR_PARTS for part in parts):
+        if _in_skipped_dir(py):
             continue
-        if any(part in _HANDWRITTEN_DIR_PARTS for part in parts):
+        if any(part in _HANDWRITTEN_DIR_PARTS for part in py.parts):
             continue
         if py.with_suffix('.ipynb').exists():
             continue

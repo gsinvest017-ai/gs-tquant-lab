@@ -31,12 +31,13 @@ if str(TOOLS) not in sys.path:
 
 from check_ipynb_py_sync import (  # noqa: E402
     _HANDWRITTEN_DIR_PARTS,
+    _SKIP_DIR_PARTS,
     _diff_preview,
     _orphan_py,
     _pairs,
     main,
 )
-from ipynb_to_py import convert_to_str  # noqa: E402
+from ipynb_to_py import _in_skipped_dir, convert_to_str  # noqa: E402
 
 
 def _touch(path: Path, content: str = '') -> Path:
@@ -92,9 +93,43 @@ class OrphanPyTests(unittest.TestCase):
         self.assertEqual(_orphan_py(self.root), [])
 
     def test_skip_dirs_are_excluded(self) -> None:
-        for skip in ('.git', '.github', '.ipynb_checkpoints', '__pycache__', '.venv', 'venv'):
+        # Iterate the shared _SKIP_DIR_PARTS rather than a hand-copied literal
+        # (M37): if a new skip dir is added to the constant, this test must
+        # cover it automatically instead of silently lagging the production set.
+        for skip in _SKIP_DIR_PARTS:
             _touch(self.root / skip / 'noise.py', '# ignored')
         self.assertEqual(_orphan_py(self.root), [])
+
+    def test_nested_skip_dirs_are_excluded(self) -> None:
+        # _in_skipped_dir matches at any depth, so an orphan .py buried under a
+        # skip dir several levels down is still excluded.
+        for skip in _SKIP_DIR_PARTS:
+            _touch(self.root / 'a' / skip / 'deep' / 'noise.py', '# ignored')
+        self.assertEqual(_orphan_py(self.root), [])
+
+    def test_orphan_skip_matches_in_skipped_dir(self) -> None:
+        """_orphan_py's skip decision is exactly _in_skipped_dir (M37).
+
+        Lay an orphan .py at the root and one under every skip dir, then assert
+        _orphan_py returns precisely the paths _in_skipped_dir rejects -- locking
+        the two sync-checker skip notions to the single shared predicate so a
+        future refactor of either cannot drift them apart.
+        """
+        candidates = [self.root / 'orphan.py']
+        for skip in _SKIP_DIR_PARTS:
+            candidates.append(self.root / skip / 'noise.py')
+        for c in candidates:
+            _touch(c, '# no notebook')
+
+        expected = sorted(
+            c.relative_to(self.root)
+            for c in candidates
+            if not _in_skipped_dir(c)
+        )
+        self.assertEqual(_orphan_py(self.root), expected)
+        # Sanity: the predicate actually excluded the skip-dir orphans, so the
+        # assertion above is meaningful (root orphan kept, skip-dir ones dropped).
+        self.assertEqual(expected, [Path('orphan.py')])
 
     def test_orphans_sorted_and_relative(self) -> None:
         """pathlib sorts by parts-tuples, not raw string: ('a','c.py') < ('a.py',)."""
